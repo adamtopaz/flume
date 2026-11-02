@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/flume"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = false

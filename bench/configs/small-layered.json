@@ -1,0 +1,8 @@
+{
+ "shape": "layered",
+ "modules": 200,
+ "seed": 1,
+ "imports_mean": 3.0,
+ "decls_per_module": 10,
+ "work": 2
+}
