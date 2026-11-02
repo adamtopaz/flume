@@ -4,9 +4,12 @@
 Usage (CI runs this; contributors run it before pushing):
   python3 ci/pr_check.py --base origin/main --title "milestone: <one line>"
 
-"Code" is flume itself: crates/, worker/, Cargo.toml, Cargo.lock. Tests (tests/) may
-change with code or on their own. The benchmark is bench/ (generator, harness, configs,
-the Blake pin).
+Every changed path must belong to a known category: code (crates/, worker/, Cargo.toml,
+Cargo.lock), tests (tests/), the benchmark (bench/ except its README), research records
+(research/), docs (*.md, bench/README.md), infrastructure (.github/, ci/, flake.nix,
+flake.lock, .gitignore), or the toolchain pin (lean-toolchain). Any other path counts as
+code, so it needs a code PR and measurements; build configuration outside Cargo.toml
+(such as .cargo/config.toml) is refused outright.
 
 The PR title must start with one of these prefixes (case-insensitive):
   research:   a performance milestone: code + log entry + idea write-up + result(s);
@@ -16,8 +19,10 @@ The PR title must start with one of these prefixes (case-insensitive):
               correct and not `failure`
   log:        a failed or inconclusive iteration: log entry (+ results), no code
   bench:      the benchmark, CI, or test scripts; no code
-  fix:        a code or infrastructure fix outside the research loop
-  toolchain:  a deliberate change of the pinned Lean toolchain (lean-toolchain)
+  fix:        a code or infrastructure fix outside the research loop; with code changes
+              it needs result(s) like `milestone:` (correct, not `failure`)
+  toolchain:  a deliberate change of the pinned Lean toolchain (lean-toolchain), with the
+              CI and dev-shell changes it needs
   ci:, docs:, chore:  infrastructure, documentation, housekeeping; no code
 
 Universal rules: `lean-toolchain` is unchanged (except `toolchain:`); code and benchmark
@@ -44,13 +49,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 KINDS = ("research", "milestone", "log", "bench", "fix", "toolchain", "ci", "docs", "chore")
 CODE_KINDS = ("research", "milestone", "fix", "toolchain")
-INFRA_KINDS = ("bench", "ci", "fix", "chore")
+INFRA_KINDS = ("bench", "ci", "fix", "chore", "toolchain")
+BENCH_KINDS = ("bench",)
 CODE_PREFIXES = ("crates/", "worker/")
 CODE_FILES = ("Cargo.toml", "Cargo.lock")
-BENCH_PREFIXES = ("bench/configs/", "bench/gen/", "bench/harness/")
-BENCH_FILES = ("bench/blake.json",)
+TEST_PREFIXES = ("tests/",)
+BENCH_PREFIXES = ("bench/",)
 INFRA_PREFIXES = (".github/", "ci/")
-INFRA_FILES = ("flake.nix", "flake.lock")
+INFRA_FILES = ("flake.nix", "flake.lock", ".gitignore")
+FORBIDDEN_PREFIXES = (".cargo/",)
+FORBIDDEN_FILES = ("rust-toolchain", "rust-toolchain.toml", "build.rs")
 RESULTS_DIR = "research/results/"
 LOG_RE = r"research/log/\d{4}-\d{2}-\d{2}-.+\.md"
 IDEA_RE = r"research/ideas/(?!README|TEMPLATE).+\.md"
@@ -82,16 +90,26 @@ def changed_files(base: str) -> dict[str, str]:
     return files
 
 
-def is_code(p: str) -> bool:
-    return p.startswith(CODE_PREFIXES) or p in CODE_FILES
+def is_docs(p: str) -> bool:
+    return p.endswith(".md") and not p.startswith(("crates/", "worker/", "research/results/"))
 
 
 def is_bench(p: str) -> bool:
-    return p.startswith(BENCH_PREFIXES) or p in BENCH_FILES
+    return p.startswith(BENCH_PREFIXES) and not is_docs(p)
 
 
 def is_infra(p: str) -> bool:
     return p.startswith(INFRA_PREFIXES) or p in INFRA_FILES
+
+
+def is_known_non_code(p: str) -> bool:
+    return (is_docs(p) or is_bench(p) or is_infra(p) or p.startswith(TEST_PREFIXES) or p.startswith("research/")
+            or p in ("lean-toolchain", "LICENSE"))
+
+
+def is_code(p: str) -> bool:
+    """flume's code, or any path no other category claims (it may affect the build)."""
+    return p.startswith(CODE_PREFIXES) or p in CODE_FILES or not is_known_non_code(p)
 
 
 def commit_exists(commit: str) -> bool:
@@ -145,6 +163,7 @@ def check_result(path: str, base: str, problems: list[str], notes: list[str]) ->
         problems.append(f"{path}: was measured on a dirty tree; commit before measuring")
     if r.get("verdict", {}).get("overall") is None:
         problems.append(f"{path}: has no verdict")
+        r.setdefault("verdict", {})["overall"] = None
     h = r.get("harness", {})
     for key, rel in (("run_py_sha256", "bench/harness/run.py"), ("generate_py_sha256", "bench/gen/generate.py"),
                      ("edits_py_sha256", "bench/harness/edits.py")):
@@ -194,13 +213,18 @@ def main() -> int:
         problems.append(f"PR title must start with one of {', '.join(k + ':' for k in KINDS)} (got {args.title!r})")
     if "lean-toolchain" in files and kind != "toolchain":
         problems.append("lean-toolchain changed; use a `toolchain:` PR if this is deliberate")
+    forbidden = sorted(p for p in files if p.startswith(FORBIDDEN_PREFIXES) or p in FORBIDDEN_FILES
+                       or p.endswith("/build.rs"))
+    if forbidden:
+        problems.append(f"build configuration outside Cargo.toml is not allowed ({', '.join(forbidden[:5])}): "
+                        f"it could change how the measured binary is built")
     if code and kind not in CODE_KINDS:
         problems.append(f"`{kind or '(none)'}:` PR changes code ({', '.join(code[:5])}); only "
                         f"{', '.join(k + ':' for k in CODE_KINDS)} may")
     if code and bench:
         problems.append(f"code and benchmark changed in the same PR; split them (code: {', '.join(code[:3])}; "
                         f"bench: {', '.join(bench[:3])})")
-    if bench and kind not in INFRA_KINDS:
+    if bench and kind not in BENCH_KINDS:
         problems.append(f"`{kind or '(none)'}:` PR changes the benchmark ({', '.join(bench[:5])}); use `bench:`")
     if infra and kind not in INFRA_KINDS:
         problems.append(f"`{kind or '(none)'}:` PR changes CI or the dev shell ({', '.join(infra[:5])}); use `ci:` or `bench:`")
@@ -216,14 +240,17 @@ def main() -> int:
         if r:
             results[p] = r
 
-    if kind in ("research", "milestone"):
+    if kind == "fix" and code and not results_added:
+        problems.append("`fix:` PR changes code but adds no research/results/*.json standard run "
+                        "(every code change must be shown correct and not slower)")
+    if kind in ("research", "milestone") or (kind == "fix" and code):
         if not code:
             problems.append(f"`{kind}:` PR changes no code; use `log:` for a result-only PR")
-        if not logs:
+        if not logs and kind != "fix":
             problems.append(f"`{kind}:` PR adds no research/log/YYYY-MM-DD-<slug>.md entry")
         if kind == "research" and not ideas:
             problems.append("`research:` PR adds no research/ideas/<slug>.md write-up")
-        if not results_added:
+        if not results_added and kind != "fix":
             problems.append(f"`{kind}:` PR adds no research/results/*.json standard run")
         try:
             merge_base = git("merge-base", "HEAD", args.base).strip()
@@ -248,7 +275,7 @@ def main() -> int:
         if on_head:
             on_head.sort()
             _, newest_path, newest = on_head[-1]
-            wanted = ("success",) if kind == "research" else ("success", "neutral")
+            wanted = ("success",) if kind == "research" else ("success", "neutral")  # milestone, fix
             if newest["verdict"]["overall"] not in wanted:
                 problems.append(f"the newest result on this PR's code ({newest_path}) has verdict "
                                 f"{newest['verdict']['overall']!r}; a `{kind}:` PR needs {' or '.join(wanted)}")

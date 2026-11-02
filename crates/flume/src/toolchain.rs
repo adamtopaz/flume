@@ -1,10 +1,10 @@
 //! Finding the Lean toolchain a project builds with, without starting a process.
 //!
 //! Resolution follows elan's rules where they are unambiguous: `FLUME_LEAN_SYSROOT`
-//! (an explicit override), else `ELAN_TOOLCHAIN`, else the nearest `lean-toolchain`
-//! file above the project. A toolchain name is tried as a path relative to that file,
-//! then as `<origin>:<release>` installed under `$ELAN_HOME/toolchains`, then as a
-//! linked toolchain of that name. Anything else falls back to `lean --print-prefix`.
+//! (an explicit override), else `ELAN_TOOLCHAIN`, else, walking up from the project, a
+//! directory override in elan's `settings.toml` or a `lean-toolchain` file. A toolchain
+//! name is tried as a path relative to that file, then as `<origin>:<release>` installed
+//! under `$ELAN_HOME/toolchains`, then as a linked toolchain of that name. Anything else falls back to `lean --print-prefix`.
 //! The githash is read from the header of the toolchain's `Init.olean` (bytes 40..80),
 //! which equals `lean --githash` for any working installation.
 
@@ -13,7 +13,6 @@ use std::process::Command;
 
 #[derive(Clone, Debug)]
 pub struct Toolchain {
-    pub sysroot: PathBuf,
     pub lean: PathBuf,
     pub githash: String,
     pub version: String,
@@ -26,6 +25,27 @@ fn elan_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".elan"))
 }
 
+/// Directory overrides (`elan override set`), from `$ELAN_HOME/settings.toml`.
+fn elan_overrides() -> Vec<(PathBuf, String)> {
+    let Some(home) = elan_home() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(home.join("settings.toml")) else {
+        return Vec::new();
+    };
+    let Ok(t) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    t.get("overrides")
+        .and_then(|o| o.as_table())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (PathBuf::from(k), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn toolchain_name(project: &Path) -> Option<(String, PathBuf)> {
     if let Some(t) = std::env::var("ELAN_TOOLCHAIN")
         .ok()
@@ -33,8 +53,12 @@ fn toolchain_name(project: &Path) -> Option<(String, PathBuf)> {
     {
         return Some((t.trim().to_string(), project.to_path_buf()));
     }
+    let overrides = elan_overrides();
     let mut dir = project.canonicalize().ok()?;
     loop {
+        if let Some((_, name)) = overrides.iter().find(|(d, _)| *d == dir) {
+            return Some((name.clone(), dir));
+        }
         let f = dir.join("lean-toolchain");
         if let Ok(text) = std::fs::read_to_string(&f) {
             let name = text.lines().next().unwrap_or("").trim().to_string();
@@ -134,7 +158,6 @@ pub fn detect(project: &Path) -> Result<Toolchain, String> {
             }
         };
     Ok(Toolchain {
-        sysroot,
         lean,
         githash,
         version,

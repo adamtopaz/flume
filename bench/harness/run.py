@@ -188,8 +188,9 @@ def git(*args: str, cwd: Path = ROOT, check: bool = True) -> str:
 
 
 def tree_dirty() -> bool:
-    """Uncommitted changes to tracked files, ignoring research/ (log entries are written during an iteration)."""
-    return bool(git("status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)research"))
+    """Uncommitted changes, including untracked files that are not ignored (they could end
+    up in the measured build), ignoring research/ (log entries are written during an iteration)."""
+    return bool(git("status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude)research"))
 
 
 def sha256_file(p: Path) -> str:
@@ -581,25 +582,22 @@ class ToolState:
     def reap(self, unit: str) -> int:
         """Kill anything a scope left behind; return how many processes there were.
 
-        systemd notices that a scope's cgroup emptied asynchronously, so a scope whose
-        command exits within milliseconds can still read `active` for a moment; only
-        processes that remain in it for a second count as stragglers."""
+        The scope's processes are read from its cgroup (`cgroup.procs`), which the kernel
+        updates synchronously; systemd's own view (`ActiveState`, `NPids`) lags behind a
+        command that exits within milliseconds."""
         if not self.use_scope:
             return 0
+        show = subprocess.run(["systemctl", "--user", "show", "-p", "ControlGroup", "-p", "ActiveState", f"{unit}.scope"],
+                              capture_output=True, text=True)
+        props = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
         n = 0
-        deadline = time.monotonic() + 1.0
-        while True:
-            show = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState", "-p", "NPids", f"{unit}.scope"],
-                                  capture_output=True, text=True)
-            props = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
-            if props.get("ActiveState") not in ("active", "deactivating"):
+        cg = props.get("ControlGroup", "")
+        if cg:
+            try:
+                n = len([x for x in Path(f"/sys/fs/cgroup{cg}/cgroup.procs").read_text().split() if x])
+            except OSError:
                 n = 0
-                break
-            n = int(props.get("NPids", "0") or 0)
-            if n == 0 or time.monotonic() >= deadline:
-                break
-            time.sleep(0.02)
-        if props.get("ActiveState") in ("active", "deactivating"):
+        if props.get("ActiveState") in ("active", "deactivating", "activating"):
             subprocess.run(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
         self.stragglers += n
         return n
@@ -694,21 +692,32 @@ class ToolState:
         }
 
     def start_server(self, checkout: Path) -> bool:
+        """`<exe> server start` in its own scope; it must return once the server is ready
+        (a server daemonizes; its output goes to a file so it cannot block the harness)."""
         unit = f"flume-bench-{os.getpid()}-{self.name}-server"
         props = ["-p", f"MemoryMax={self.mem_gb}G"] if (self.use_scope and self.mem_gb) else []
-        cmd = ([ "systemd-run", "--user", "--scope", "-q", f"--unit={unit}", *props, "--"] if self.use_scope else []) \
+        cmd = (["systemd-run", "--user", "--scope", "-q", f"--unit={unit}", *props, "--"] if self.use_scope else []) \
             + [self.tool["exe"], "server", "start"]
-        p = subprocess.run(cmd, cwd=checkout, env=self.env, capture_output=True, text=True, timeout=600,
-                           start_new_session=True)
+        logf = self.cache / "server.log"
         self.server_unit = unit if self.use_scope else None
+        try:
+            with open(logf, "w", encoding="utf-8") as out:
+                p = subprocess.run(cmd, cwd=checkout, env=self.env, stdin=subprocess.DEVNULL, stdout=out,
+                                   stderr=subprocess.STDOUT, timeout=600, start_new_session=True)
+        except subprocess.TimeoutExpired:
+            log(f"[{self.name}] server start did not return within 600 s")
+            return False
         if p.returncode != 0:
-            log(f"[{self.name}] server start failed ({p.returncode}): {(p.stdout + p.stderr)[-1000:]}")
+            log(f"[{self.name}] server start failed ({p.returncode}): {logf.read_text(errors='replace')[-1000:]}")
             return False
         return True
 
     def stop_server(self, checkout: Path) -> int:
-        subprocess.run([self.tool["exe"], "server", "stop"], cwd=checkout, env=self.env, capture_output=True,
-                       timeout=600)
+        try:
+            subprocess.run([self.tool["exe"], "server", "stop"], cwd=checkout, env=self.env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+        except subprocess.TimeoutExpired:
+            log(f"[{self.name}] server stop did not return within 600 s")
         time.sleep(0.5)
         n = self.reap(self.server_unit) if self.server_unit else 0
         self.server_unit = None
@@ -945,6 +954,15 @@ class CorpusRun:
                     and not (broken["stragglers"] or recovered["stragglers"])
                 log(f"[{self.cfg_name}/{name}] break/{kind}: broken build exit {broken['exit_code']} "
                     f"({broken['failed_jobs']} failed jobs), recovered exit {recovered['exit_code']}")
+            # repair: deleted artifacts (other than the .olean) must be rebuilt, as Lake does
+            hub, leaf = self.targets["hub"], self.targets["leaf"]
+            for mod, facet in ((hub, "c"), (hub, "ilean"), (leaf, "olean.server" if "olean.server" in self.facets else "c")):
+                facet_path(d / ".lake" / "build", mod, facet).unlink(missing_ok=True)
+            repaired = s.build(d)
+            self.record(name, "repaired", d, self.modules[name])
+            brk["repair"] = {"exit_code": repaired["exit_code"], "jobs": repaired["jobs"]}
+            brk["ok"] = brk["ok"] and repaired["exit_code"] == 0 and not repaired["stragglers"]
+            log(f"[{self.cfg_name}/{name}] repair: exit {repaired['exit_code']}, {repaired['jobs']} jobs")
             self.results[name]["break"] = brk
 
     def with_servers(self, names: list[str], fn) -> None:
@@ -1028,7 +1046,17 @@ def correctness_for(tool_name: str, manifests: dict, measurements: dict, corpora
         break_ok = None if brk is None else (bool(brk.get("ok")) and all(
             brk.get(kind, {}).get("broken_failed_jobs") == lake_brk.get(kind, {}).get("broken_failed_jobs")
             for kind in ("rename", "body")))
+        # informational: scenarios where the tool rebuilt a different number of modules
+        # than Lake on the same edits (fewer needs a proof of identical outputs)
+        rebuilds = {}
+        for key, r in res.items():
+            if key.split("@")[0] in SINGLE and isinstance(r, dict) and "runs" in r:
+                mine_jobs = [x.get("jobs") for x in r["runs"]]
+                lake_jobs = [x.get("jobs") for x in lake_res.get(key, {}).get("runs", [])]
+                if lake_jobs and mine_jobs != lake_jobs:
+                    rebuilds[key] = {"lake": lake_jobs, tool_name: mine_jobs}
         out[cfg_name] = {
+            "rebuild_counts_differ": rebuilds,
             "identical": bool(steps) and all(v["identical"] for v in steps.values()),
             "builds_ok": builds_ok,
             "break_ok": break_ok,
@@ -1164,6 +1192,10 @@ def print_report(result: dict) -> None:
               "INCORRECT: " + "; ".join(f"{k}: identical={v['identical']} builds_ok={v['builds_ok']} break_ok={v['break_ok']}"
                                          for k, v in c.items()
                                          if not (v["identical"] and v["builds_ok"] and v["break_ok"] is not False))))
+    for tool, c in result["correctness"].items():
+        for cfg, v in c.items():
+            for key, counts in v.get("rebuild_counts_differ", {}).items():
+                print(f"note: {tool} rebuilt a different number of modules than lake in {cfg}/{key}: {counts}")
     v = result["verdict"]
     for key, s in v.get("per_scenario", {}).items():
         print(f"verdict {key}: {s['state']} ({s['statistic']} speedup {s['speedup']:.3f}x over {s['pairs']} runs, "

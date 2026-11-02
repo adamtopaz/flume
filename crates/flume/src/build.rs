@@ -1,39 +1,45 @@
 //! Building a package's Lean modules.
 //!
-//! 1. **Discovery.** The targets' modules (from library globs) and, transitively, every
-//!    local module they import. An import that is not local must be a module of the
-//!    toolchain (`Init`, `Std`, `Lean`, `Lake`, ...), which needs no building. A source
-//!    whose file status is unchanged since the last build is neither read nor parsed.
-//! 2. **Keys.** A module's key hashes everything its outputs depend on: the toolchain's
-//!    githash, the package name, the library's Lean options and arguments, the module's
-//!    name and source, and for each local import the content of that import's artifacts
-//!    and of what it re-exports, combined exactly as Lake 5 does (`addImport`,
-//!    `computeExportInfo` in `Lake/Build/Module.lean`): a module-system importer depends
-//!    on an imported module's `.olean` and, through its exported imports, theirs; `meta
-//!    import` adds the IR, `import all` everything; a non-module importer depends on all
-//!    artifacts of everything below it. The hashes are Merkle-style, linear in the graph.
-//!    An unchanged key with intact outputs means up to date, and a rebuild that
-//!    reproduces an import's artifacts leaves its dependents alone, as in Lake.
-//! 3. **Compilation.** Exactly what Lake 5 runs: `lean <args> <file> -o <olean> -i <ilean>
-//!    -c <c> --setup <setup.json> --json` with `LEAN_PATH` set to the package's library
-//!    directory, the setup file listing the import artifacts Lake would list (its
-//!    `fetchTransImportArts` walk). Outputs land in Lake's build layout.
+//! 1. **Discovery.** The targets' modules (from library globs, expanded as Lake does) and,
+//!    transitively, every module they import that a library of the package can build
+//!    (Lake's `findModule?`: the last library whose globs or roots cover it). Other imports
+//!    are left to `lean`: toolchain modules (`Init`, `Std`, `Lean`, ...) need no building,
+//!    and an unknown one makes the compile fail, as in Lake. A source whose file status is
+//!    unchanged since the last build is neither read nor parsed. A module whose header
+//!    cannot be read or parsed, or that is part of an import cycle, fails on its own and
+//!    blocks only its dependents.
+//! 2. **Keys.** A module's key hashes everything Lake traces: the toolchain's githash, the
+//!    package name, the library's Lean options and `moreLeanArgs` (not `weakLeanArgs`),
+//!    the module's name and source (line endings normalized, as `Hash.ofText` does), and
+//!    for each local import the content of that import's artifacts and of what it
+//!    re-exports, combined exactly as Lake 5 does (`addImport`, `computeExportInfo` in
+//!    `Lake/Build/Module.lean`): a module-system importer depends on an imported module's
+//!    `.olean` and, through its exported imports, theirs; `meta import` adds the IR,
+//!    `import all` everything; a non-module importer depends on all artifacts below it.
+//!    The hashes are Merkle-style, linear in the graph. An unchanged key with every
+//!    output intact means up to date, and a rebuild that reproduces an import's
+//!    artifacts leaves its dependents alone, as in Lake.
+//! 3. **Compilation.** Exactly what Lake 5 runs: `lean <weak args> <more args> <file> -o
+//!    <olean> -i <ilean> -c <c> --setup <setup.json> --json` with `LEAN_PATH` set to the
+//!    package's library directory, after removing the module's old outputs; the setup
+//!    file lists the import artifacts Lake would list (its `fetchTransImportArts` walk).
+//!    A compile fails if `lean` exits non-zero or logs an error.
 //! 4. **Scheduling.** A pool of `jobs` workers takes ready modules, tallest first
 //!    (longest chain of dependents), so the critical path starts as early as possible.
 
-use crate::config::{Lib, Package};
+use crate::config::{Glob, Lib, Package};
 use crate::header;
-use crate::store::{Built, FileStat, SourceInfo, State, StoredImport};
+use crate::store::{BuildLock, Built, FileStat, SourceInfo, State, StoredImport};
 use crate::toolchain::Toolchain;
 use serde_json::{json, Map, Value as Json};
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-const KEY_VERSION: &str = "flume-key-1";
+const KEY_VERSION: &str = "flume-key-2";
 const MODULE_FACETS: [&str; 7] = [
     "olean",
     "olean.server",
@@ -51,8 +57,8 @@ pub struct Options {
     pub verbose: bool,
 }
 
-/// An import of a local module (toolchain modules need no building and are covered
-/// by the toolchain's githash).
+/// An import of a local module (toolchain modules need no building and are covered by
+/// the toolchain's githash).
 #[derive(Clone, Copy)]
 struct LocalImport {
     idx: usize,
@@ -69,6 +75,8 @@ struct Module {
     lib: usize,
     is_module: bool,
     src_hash: String,
+    /// why the module fails without being compiled (unreadable, unparsable, cycle)
+    error: Option<String>,
     imports: Vec<LocalImport>,
     deps: Vec<usize>,
     dependents: Vec<usize>,
@@ -98,11 +106,15 @@ struct Done {
 
 type Hash = [u8; 32];
 
+/// Modules to start discovery from, each with the library that builds it.
+type Roots = Vec<(Vec<String>, usize)>;
+
 /// facet -> content hash of a module's outputs
 type Outputs = Vec<(String, String)>;
 
-/// A successful compilation: outputs, the `.olean`'s status, messages, milliseconds.
-type Compiled = (Outputs, FileStat, Vec<String>, u128);
+/// The outcome of processing one module: status, outputs, and the state record to keep
+/// (`Some(Some(b))` replace, `Some(None)` forget, `None` leave unchanged).
+type Outcome = (Status, Outputs, Option<Option<Built>>);
 
 fn mix(parts: &[&[u8]]) -> Hash {
     let mut h = blake3::Hasher::new();
@@ -134,6 +146,20 @@ fn hash_file(p: &Path) -> std::io::Result<String> {
     Ok(blake3::hash(&std::fs::read(p)?).to_hex().to_string())
 }
 
+/// Lake's source hash ignores line endings (`Hash.ofText` normalizes CRLF to LF).
+fn source_hash(bytes: &[u8]) -> String {
+    let mut h = blake3::Hasher::new();
+    let mut start = 0;
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            h.update(&bytes[start..i]);
+            start = i + 1;
+        }
+    }
+    h.update(&bytes[start..]);
+    h.finalize().to_hex().to_string()
+}
+
 fn module_file(lib: &Lib, comps: &[String]) -> PathBuf {
     let mut p = lib.src_dir.clone();
     for c in &comps[..comps.len() - 1] {
@@ -143,9 +169,10 @@ fn module_file(lib: &Lib, comps: &[String]) -> PathBuf {
     p
 }
 
-/// The modules a library's globs select (files under its source directory).
+/// The modules a library's globs select, as Lake's `Glob.forEachModuleIn`: the base of
+/// `A` and `A.*` is included whether or not its file exists (a missing file fails to
+/// compile), and the directory of `A.+`/`A.*` must exist.
 fn lib_modules(lib: &Lib) -> Result<Vec<Vec<String>>, String> {
-    use crate::config::Glob;
     let mut out = Vec::new();
     for g in &lib.globs {
         let (base, me, subs) = match g {
@@ -153,7 +180,7 @@ fn lib_modules(lib: &Lib) -> Result<Vec<Vec<String>>, String> {
             Glob::Submodules(n) => (n, false, true),
             Glob::AndSubmodules(n) => (n, true, true),
         };
-        if me && module_file(lib, base).is_file() {
+        if me {
             out.push(base.clone());
         }
         if subs {
@@ -170,21 +197,29 @@ fn lib_modules(lib: &Lib) -> Result<Vec<Vec<String>>, String> {
     Ok(out)
 }
 
+/// Lean's `forEachModuleInDir`: directories (following symlinks) are recursed into, and
+/// every file with extension `lean` is a module named by its file stem.
 fn walk(dir: &Path, prefix: &[String], out: &mut Vec<Vec<String>>) -> Result<(), String> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Ok(());
-    };
+    let rd = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read directory {}: {e}", dir.display()))?;
     for e in rd {
         let e = e.map_err(|e| e.to_string())?;
+        let path = e.path();
         let name = e.file_name().to_string_lossy().to_string();
-        let ft = e.file_type().map_err(|e| e.to_string())?;
-        if ft.is_dir() {
+        if std::fs::metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             let mut p = prefix.to_vec();
             p.push(name);
-            walk(&e.path(), &p, out)?;
-        } else if let Some(stem) = name.strip_suffix(".lean") {
+            walk(&path, &p, out)?;
+        } else if path.extension().is_some_and(|x| x == "lean") {
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             let mut p = prefix.to_vec();
-            p.push(stem.to_string());
+            p.push(stem);
             out.push(p);
         }
     }
@@ -195,117 +230,123 @@ struct Graph {
     mods: Vec<Module>,
 }
 
-fn discover(
-    pkg: &Package,
-    tc: &Toolchain,
-    state: &State,
-    targets: &[String],
-    sources: &mut HashMap<String, SourceInfo>,
-) -> Result<Graph, String> {
-    let mut roots: Vec<(Vec<String>, Option<usize>)> = Vec::new();
+/// The targets to build, and the errors of library targets whose modules could not be
+/// listed (Lake fails those and still builds the rest); `None` when there are no targets
+/// (Lake then warns and does nothing).
+fn target_roots(pkg: &Package, targets: &[String]) -> Result<Option<(Roots, Vec<String>)>, String> {
     let names: Vec<String> = if !targets.is_empty() {
         targets.to_vec()
-    } else if !pkg.default_targets.is_empty() {
-        pkg.default_targets.clone()
     } else {
-        pkg.libs.iter().map(|l| l.name.clone()).collect()
+        pkg.default_targets.clone()
     };
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let mut roots = Vec::new();
+    let mut errors = Vec::new();
     for t in &names {
         if let Some(li) = pkg.libs.iter().position(|l| &l.name == t) {
-            for m in lib_modules(&pkg.libs[li])? {
-                roots.push((m, Some(li)));
+            match lib_modules(&pkg.libs[li]) {
+                Ok(ms) => roots.extend(ms.into_iter().map(|m| (m, li))),
+                Err(e) => errors.push(format!("{t}: {e}")),
             }
         } else {
-            roots.push((crate::config::split_name(t), None));
+            let comps = crate::config::split_name(t);
+            match pkg.find_module(&comps) {
+                Some(li) => roots.push((comps, li)),
+                None => return Err(format!("unknown target `{t}`")),
+            }
         }
     }
+    Ok(Some((roots, errors)))
+}
+
+fn read_source(file: &Path, stat: FileStat) -> Result<SourceInfo, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let h = header::parse(&text).map_err(|e| {
+        let line = text[..e.pos.min(text.len())].matches('\n').count() + 1;
+        format!("{}:{}: {}", file.display(), line, e.msg)
+    })?;
+    let racy = stat.is_racy();
+    Ok(SourceInfo {
+        stat,
+        hash: source_hash(&bytes),
+        is_module: h.is_module,
+        imports: h
+            .imports
+            .into_iter()
+            .map(|i| StoredImport {
+                module: i.module,
+                all: i.all,
+                exported: i.exported,
+                meta: i.meta,
+            })
+            .collect(),
+        racy,
+    })
+}
+
+fn discover(
+    pkg: &Package,
+    state: &State,
+    roots: Roots,
+    sources: &mut HashMap<String, SourceInfo>,
+) -> Graph {
     let mut index: HashMap<Vec<String>, usize> = HashMap::new();
     let mut mods: Vec<Module> = Vec::new();
     let mut imports_of: Vec<Vec<StoredImport>> = Vec::new();
-    let mut queue: VecDeque<(Vec<String>, Option<usize>, Option<String>)> =
-        roots.into_iter().map(|(m, l)| (m, l, None)).collect();
-    let toolchain_lib = tc.sysroot.join("lib").join("lean");
-    while let Some((comps, lib_hint, importer)) = queue.pop_front() {
+    let mut queue: VecDeque<(Vec<String>, usize)> = roots.into_iter().collect();
+    while let Some((comps, li)) = queue.pop_front() {
         if index.contains_key(&comps) {
             continue;
         }
-        let lib = lib_hint.or_else(|| {
-            pkg.libs
-                .iter()
-                .position(|l| l.is_local_module(&comps) && module_file(l, &comps).is_file())
-        });
-        let Some(li) = lib else {
-            let mut olean = toolchain_lib.clone();
-            for c in &comps {
-                olean.push(c);
-            }
-            if olean.with_extension("olean").is_file() {
-                continue; // a toolchain module
-            }
-            let name = header::name_to_string(&comps);
-            return Err(match importer {
-                Some(by) => format!("unknown module `{name}` (imported by `{by}`)"),
-                None => format!("unknown target `{name}`"),
-            });
-        };
         let file = module_file(&pkg.libs[li], &comps);
         let name = header::name_to_string(&comps);
-        let stat =
-            FileStat::of(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        let info = match state.sources.get(&name) {
-            Some(s) if s.stat == stat => s.clone(),
-            _ => {
-                let bytes = std::fs::read(&file)
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-                let text = String::from_utf8_lossy(&bytes);
-                let h = header::parse(&text).map_err(|e| {
-                    let line = text[..e.pos.min(text.len())].matches('\n').count() + 1;
-                    format!("{}:{}: {}", file.display(), line, e.msg)
-                })?;
-                SourceInfo {
-                    stat,
-                    hash: blake3::hash(&bytes).to_hex().to_string(),
-                    is_module: h.is_module,
-                    imports: h
-                        .imports
-                        .into_iter()
-                        .map(|i| StoredImport {
-                            module: i.module,
-                            all: i.all,
-                            exported: i.exported,
-                            meta: i.meta,
-                        })
-                        .collect(),
-                }
-            }
+        let info = match FileStat::of(&file) {
+            Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+            Ok(stat) => match state.sources.get(&name) {
+                Some(s) if s.stat == stat && !s.racy => Ok(s.clone()),
+                _ => read_source(&file, stat),
+            },
         };
         let rel_file = file
             .strip_prefix(&pkg.root)
             .unwrap_or(&file)
             .to_string_lossy()
             .to_string();
-        let imps: Vec<StoredImport> = info.imports.clone();
+        let (is_module, src_hash, error, imps) = match info {
+            Ok(info) => {
+                let imps = info.imports.clone();
+                let r = (info.is_module, info.hash.clone(), None, imps);
+                sources.insert(name.clone(), info);
+                r
+            }
+            Err(e) => (false, String::new(), Some(e), Vec::new()),
+        };
         for imp in &imps {
             if !index.contains_key(&imp.module) {
-                queue.push_back((imp.module.clone(), None, Some(name.clone())));
+                if let Some(ili) = pkg.find_module(&imp.module) {
+                    queue.push_back((imp.module.clone(), ili));
+                }
             }
         }
         index.insert(comps.clone(), mods.len());
         mods.push(Module {
-            name: name.clone(),
+            name,
             comps,
             file,
             rel_file,
             lib: li,
-            is_module: info.is_module,
-            src_hash: info.hash.clone(),
+            is_module,
+            src_hash,
+            error,
             imports: Vec::new(),
             deps: Vec::new(),
             dependents: Vec::new(),
             height: 0,
         });
         imports_of.push(imps);
-        sources.insert(name, info);
     }
     for (i, imps) in imports_of.iter().enumerate() {
         mods[i].imports = imps
@@ -322,33 +363,34 @@ fn discover(
         let mut deps: Vec<usize> = mods[i].imports.iter().map(|li| li.idx).collect();
         deps.sort_unstable();
         deps.dedup();
-        for &d in &deps {
-            mods[d].dependents.push(i);
-        }
         mods[i].deps = deps;
     }
-    // topological order (detects cycles), then heights
+    // Modules on an import cycle fail on their own; their dependents are blocked.
     let n = mods.len();
+    let cyclic = cycle_members(&mods);
+    for &i in &cyclic {
+        mods[i].error = Some(format!("import cycle involving `{}`", mods[i].name));
+        mods[i].imports.clear();
+        mods[i].deps.clear();
+    }
+    for i in 0..n {
+        for d in mods[i].deps.clone() {
+            mods[d].dependents.push(i);
+        }
+    }
+    // heights, in reverse topological order
     let mut indeg: Vec<usize> = mods.iter().map(|m| m.deps.len()).collect();
     let mut order: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
     let mut k = 0;
     while k < order.len() {
         let i = order[k];
         k += 1;
-        for &j in &mods[i].dependents.clone() {
+        for j in mods[i].dependents.clone() {
             indeg[j] -= 1;
             if indeg[j] == 0 {
                 order.push(j);
             }
         }
-    }
-    if order.len() != n {
-        let stuck: Vec<&str> = (0..n)
-            .filter(|&i| indeg[i] > 0)
-            .take(5)
-            .map(|i| mods[i].name.as_str())
-            .collect();
-        return Err(format!("import cycle among: {}", stuck.join(", ")));
     }
     for &i in order.iter().rev() {
         let h = mods[i]
@@ -359,7 +401,63 @@ fn discover(
             .unwrap_or(0);
         mods[i].height = h;
     }
-    Ok(Graph { mods })
+    Graph { mods }
+}
+
+/// Modules that lie on an import cycle (strongly connected components of size > 1, or
+/// a module importing itself), found with Tarjan's algorithm (iteratively).
+fn cycle_members(mods: &[Module]) -> Vec<usize> {
+    let n = mods.len();
+    let mut index = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next = 0usize;
+    let mut out = Vec::new();
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        let mut work: Vec<(usize, usize)> = vec![(root, 0)];
+        while let Some(&(v, ei)) = work.last() {
+            if ei == 0 && index[v] == usize::MAX {
+                index[v] = next;
+                low[v] = next;
+                next += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if ei < mods[v].deps.len() {
+                work.last_mut().unwrap().1 += 1;
+                let w = mods[v].deps[ei];
+                if index[w] == usize::MAX {
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                work.pop();
+                if let Some(&(parent, _)) = work.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut comp = Vec::new();
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack[w] = false;
+                        comp.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    if comp.len() > 1 || mods[v].deps.contains(&v) {
+                        out.extend(comp);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Lake's `arts` / `allArts` of a module, as paths.
@@ -429,18 +527,15 @@ fn setup_import_arts(g: &Graph, m: &Module) -> Vec<(usize, bool)> {
     for li in m.imports.iter().rev() {
         enqueue(non_module || li.all, li.meta, li.idx, &mut q);
     }
-    let mut all_visited: std::collections::HashSet<usize> = Default::default();
-    let mut meta_visited: std::collections::HashSet<usize> = Default::default();
+    let mut all_visited: HashSet<usize> = HashSet::new();
+    let mut meta_visited: HashSet<usize> = HashSet::new();
     while let Some(Entry { idx, all, meta }) = q.pop() {
         let do_all = all && !all_visited.contains(&idx);
         let do_meta = meta && !meta_visited.contains(&idx);
         let existing = pos.get(&idx).copied();
-        if let Some(k) = existing {
-            let widenable = g.mods[idx].is_module; // a module-system entry carries `.server`
-            if !(widenable && (do_all || do_meta)) {
-                continue;
-            }
-            let _ = k;
+        // only a module-system entry (which carries `.server`) is ever widened
+        if existing.is_some() && !(g.mods[idx].is_module && (do_all || do_meta)) {
+            continue;
         }
         if all {
             all_visited.insert(idx);
@@ -498,7 +593,7 @@ impl Shared<'_> {
         put(serde_json::to_string(&lib.options)
             .unwrap_or_default()
             .as_bytes());
-        put(lib.lean_args.join("\0").as_bytes());
+        put(lib.more_args.join("\0").as_bytes()); // Lake traces `leanArgs`, not the weak ones
         put(m.name.as_bytes());
         put(m.src_hash.as_bytes());
         put(if m.is_module { b"module" } else { b"legacy" });
@@ -593,33 +688,35 @@ impl Shared<'_> {
         }
     }
 
-    /// The remembered outputs if the module is up to date; also a refreshed record when
-    /// the `.olean`'s file status changed but its content did not (e.g. a copied checkout).
+    /// The remembered outputs if the module is up to date: every output exists with its
+    /// remembered status, or with its remembered content (then the record is refreshed,
+    /// e.g. in a copied checkout).
     fn up_to_date(&self, i: usize, key: &str) -> Option<(Outputs, Option<Built>)> {
         let m = &self.g.mods[i];
         let b = self.state.built.get(&m.name)?;
-        if b.key != key {
+        if b.key != key || b.outputs.len() != facets(m.is_module).len() {
             return None;
         }
-        let olean = artifact_path(self.pkg, &m.comps, "olean");
-        let stat = FileStat::of(&olean).ok()?;
-        if stat == b.olean_stat {
-            return Some((b.outputs.clone(), None));
-        }
-        // status changed: trust the outputs only if they still hash to what was built
+        let mut stats = Vec::with_capacity(b.outputs.len());
+        let mut changed = false;
         for (f, h) in &b.outputs {
-            if hash_file(&artifact_path(self.pkg, &m.comps, f)).ok()? != *h {
-                return None;
+            let p = artifact_path(self.pkg, &m.comps, f);
+            let stat = FileStat::of(&p).ok()?;
+            let remembered = b.stats.iter().find(|(k, _)| k == f).map(|(_, s)| s);
+            if remembered != Some(&stat) {
+                if hash_file(&p).ok()? != *h {
+                    return None;
+                }
+                changed = true;
             }
+            stats.push((f.clone(), stat));
         }
-        Some((
-            b.outputs.clone(),
-            Some(Built {
-                key: key.to_string(),
-                outputs: b.outputs.clone(),
-                olean_stat: stat,
-            }),
-        ))
+        let refreshed = changed.then(|| Built {
+            key: key.to_string(),
+            outputs: b.outputs.clone(),
+            stats,
+        });
+        Some((b.outputs.clone(), refreshed))
     }
 
     fn setup_json(&self, i: usize) -> Json {
@@ -641,7 +738,12 @@ impl Shared<'_> {
         })
     }
 
-    fn compile(&self, i: usize) -> Result<Compiled, (Vec<String>, String)> {
+    /// Compile a module: `Ok((outputs, stats, messages, ms))` or `Err((messages, error))`.
+    #[allow(clippy::type_complexity)]
+    fn compile(
+        &self,
+        i: usize,
+    ) -> Result<(Outputs, Vec<(String, FileStat)>, Vec<String>, u128), (Vec<String>, String)> {
         let m = &self.g.mods[i];
         let lib = &self.pkg.libs[m.lib];
         let olean = artifact_path(self.pkg, &m.comps, "olean");
@@ -653,7 +755,6 @@ impl Shared<'_> {
                 let _ = std::fs::create_dir_all(d);
             }
         }
-        let fail = |msgs: Vec<String>, e: String| Err((msgs, e));
         // Like Lake (`Module.clearOutputArtifacts`): remove the old outputs first, so a
         // failed compile never leaves stale artifacts behind.
         for f in MODULE_FACETS.iter().chain(["ltar", "bc"].iter()) {
@@ -663,10 +764,11 @@ impl Shared<'_> {
             &setup,
             serde_json::to_vec_pretty(&self.setup_json(i)).unwrap_or_default(),
         ) {
-            return fail(vec![], format!("cannot write {}: {e}", setup.display()));
+            return Err((vec![], format!("cannot write {}: {e}", setup.display())));
         }
         let mut cmd = Command::new(&self.tc.lean);
-        cmd.args(&lib.lean_args)
+        cmd.args(&lib.weak_args)
+            .args(&lib.more_args)
             .arg(&m.file)
             .arg("-o")
             .arg(&olean)
@@ -681,17 +783,15 @@ impl Shared<'_> {
             .current_dir(&self.pkg.root)
             .stdin(Stdio::null());
         let t0 = Instant::now();
-        let out = match cmd.output() {
-            Ok(o) => o,
-            Err(e) => {
-                return fail(
-                    vec![],
-                    format!("cannot run {}: {e}", self.tc.lean.display()),
-                )
-            }
-        };
+        let out = cmd.output().map_err(|e| {
+            (
+                vec![],
+                format!("cannot run {}: {e}", self.tc.lean.display()),
+            )
+        })?;
         let ms = t0.elapsed().as_millis();
         let mut msgs = Vec::new();
+        let mut logged_error = false;
         for line in String::from_utf8_lossy(&out.stdout)
             .lines()
             .chain(String::from_utf8_lossy(&out.stderr).lines())
@@ -699,38 +799,106 @@ impl Shared<'_> {
             if line.trim().is_empty() {
                 continue;
             }
-            msgs.push(render_message(line, &m.rel_file));
+            let (text, is_error) = render_message(line, &m.rel_file);
+            logged_error |= is_error;
+            msgs.push(text);
         }
-        if !out.status.success() {
-            return fail(msgs, String::new());
+        if !out.status.success() || logged_error {
+            return Err((msgs, String::new()));
         }
         let mut outputs = Vec::new();
+        let mut stats = Vec::new();
         for f in facets(m.is_module) {
             let p = artifact_path(self.pkg, &m.comps, f);
-            match hash_file(&p) {
-                Ok(h) => outputs.push((f.to_string(), h)),
-                Err(e) => return fail(msgs, format!("missing output {}: {e}", p.display())),
+            match (hash_file(&p), FileStat::of(&p)) {
+                (Ok(h), Ok(st)) => {
+                    outputs.push((f.to_string(), h));
+                    stats.push((f.to_string(), st));
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    return Err((msgs, format!("missing output {}: {e}", p.display())))
+                }
             }
         }
-        let stat = match FileStat::of(&olean) {
-            Ok(s) => s,
-            Err(e) => return fail(msgs, format!("cannot stat {}: {e}", olean.display())),
-        };
-        Ok((outputs, stat, msgs, ms))
+        Ok((outputs, stats, msgs, ms))
     }
 
     fn print(&self, text: &str) {
-        let _g = self.out.lock().unwrap();
+        let _g = self.out.lock().unwrap_or_else(|e| e.into_inner());
         let mut so = std::io::stdout().lock();
         let _ = so.write_all(text.as_bytes());
         let _ = so.flush();
+    }
+
+    fn next_count(&self) -> usize {
+        let mut s = self.sched.lock().unwrap_or_else(|e| e.into_inner());
+        s.compiled += 1;
+        s.compiled
+    }
+
+    fn report_failure(&self, name: &str, msgs: &[String], err: &str) {
+        let n = self.next_count();
+        let mut text = format!("✖ [{n}/{}] Building {name}\n", self.g.mods.len());
+        for l in msgs {
+            text.push_str(l);
+            text.push('\n');
+        }
+        if !err.is_empty() {
+            text.push_str(&format!("error: {err}\n"));
+        }
+        self.print(&text);
+    }
+
+    /// Check or build one module whose dependencies are all finished.
+    fn process(&self, i: usize) -> Outcome {
+        let m = &self.g.mods[i];
+        let total = self.g.mods.len();
+        if let Some(e) = &m.error {
+            self.report_failure(&m.name, &[], e);
+            return (Status::Failed, Vec::new(), Some(None));
+        }
+        let key = {
+            let s = self.sched.lock().unwrap_or_else(|e| e.into_inner());
+            self.key(i, &s.done)
+        };
+        if let Some((outputs, refreshed)) = self.up_to_date(i, &key) {
+            return (Status::UpToDate, outputs, refreshed.map(Some));
+        }
+        match self.compile(i) {
+            Ok((outputs, stats, msgs, ms)) => {
+                let n = self.next_count();
+                let warn = msgs.iter().any(|l| l.starts_with("warning:"));
+                let mut text = format!(
+                    "{} [{n}/{total}] Built {} ({ms}ms)\n",
+                    if warn { "⚠" } else { "✔" },
+                    m.name
+                );
+                if warn || self.verbose {
+                    for l in &msgs {
+                        text.push_str(l);
+                        text.push('\n');
+                    }
+                }
+                self.print(&text);
+                let b = Built {
+                    key,
+                    outputs: outputs.clone(),
+                    stats,
+                };
+                (Status::Built, outputs, Some(Some(b)))
+            }
+            Err((msgs, err)) => {
+                self.report_failure(&m.name, &msgs, &err);
+                (Status::Failed, Vec::new(), Some(None))
+            }
+        }
     }
 
     fn worker(&self) {
         let total = self.g.mods.len();
         loop {
             let i = {
-                let mut s = self.sched.lock().unwrap();
+                let mut s = self.sched.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
                     if let Some((_, std::cmp::Reverse(i))) = s.ready.pop() {
                         break i;
@@ -738,71 +906,28 @@ impl Shared<'_> {
                     if s.finished == total {
                         return;
                     }
-                    s = self.cv.wait(s).unwrap();
+                    s = self.cv.wait(s).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            // all dependencies of i are finished, so their `done` entries are final
-            let key = {
-                let s = self.sched.lock().unwrap();
-                self.key(i, &s.done)
-            };
-            let m = &self.g.mods[i];
-            let (status, outputs, built) = match self.up_to_date(i, &key) {
-                Some((outputs, refreshed)) => (Status::UpToDate, outputs, refreshed.map(Some)),
-                None => match self.compile(i) {
-                    Ok((outputs, stat, msgs, ms)) => {
-                        let n = {
-                            let mut s = self.sched.lock().unwrap();
-                            s.compiled += 1;
-                            s.compiled
-                        };
-                        let warn = msgs.iter().any(|l| l.starts_with("warning:"));
-                        let mut text = format!(
-                            "{} [{n}/{total}] Built {} ({ms}ms)\n",
-                            if warn { "⚠" } else { "✔" },
-                            m.name
+            // a panic while processing one module fails that module, not the build
+            let (status, outputs, built) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process(i)))
+                    .unwrap_or_else(|_| {
+                        self.report_failure(
+                            &self.g.mods[i].name,
+                            &[],
+                            "internal error (panic) in flume",
                         );
-                        if warn || self.verbose {
-                            for l in &msgs {
-                                text.push_str(l);
-                                text.push('\n');
-                            }
-                        }
-                        self.print(&text);
-                        let b = Built {
-                            key: key.clone(),
-                            outputs: outputs.clone(),
-                            olean_stat: stat,
-                        };
-                        (Status::Built, outputs, Some(Some(b)))
-                    }
-                    Err((msgs, err)) => {
-                        let n = {
-                            let mut s = self.sched.lock().unwrap();
-                            s.compiled += 1;
-                            s.compiled
-                        };
-                        let mut text = format!("✖ [{n}/{total}] Building {}\n", m.name);
-                        for l in &msgs {
-                            text.push_str(l);
-                            text.push('\n');
-                        }
-                        if !err.is_empty() {
-                            text.push_str(&format!("error: {err}\n"));
-                        }
-                        self.print(&text);
                         (Status::Failed, Vec::new(), Some(None))
-                    }
-                },
-            };
-            let mut s = self.sched.lock().unwrap();
+                    });
+            let mut s = self.sched.lock().unwrap_or_else(|e| e.into_inner());
             if status != Status::Failed {
                 let info = self.export_info(i, &outputs, &s.done);
                 s.done[i] = info;
             }
             s.status[i] = status;
             if let Some(b) = built {
-                s.new_built.insert(m.name.clone(), b);
+                s.new_built.insert(self.g.mods[i].name.clone(), b);
             }
             s.finished += 1;
             let mut stack = vec![i];
@@ -834,35 +959,50 @@ impl Shared<'_> {
     }
 }
 
-fn render_message(line: &str, rel_file: &str) -> String {
+/// Lake's rendering of one `lean --json` message, and whether it is an error.
+fn render_message(line: &str, rel_file: &str) -> (String, bool) {
     match serde_json::from_str::<Json>(line) {
         Ok(Json::Object(o)) => {
             let sev = o.get("severity").and_then(Json::as_str).unwrap_or("info");
+            let is_error = sev == "error";
             let sev = if sev == "information" { "info" } else { sev };
             let data = o
                 .get("data")
                 .and_then(Json::as_str)
                 .unwrap_or("")
                 .trim_end();
-            match o.get("pos") {
+            let text = match o.get("pos") {
                 Some(p) => format!(
                     "{sev}: {rel_file}:{}:{}: {data}",
                     p.get("line").and_then(Json::as_u64).unwrap_or(0),
                     p.get("column").and_then(Json::as_u64).unwrap_or(0)
                 ),
                 None => format!("{sev}: {rel_file}: {data}"),
-            }
+            };
+            (text, is_error)
         }
-        _ => line.to_string(),
+        _ => (line.to_string(), false),
     }
 }
 
 /// Build the targets; returns whether everything succeeded.
 pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, String> {
-    let state_path = pkg.root.join(".lake").join("flume").join("state.json");
+    let Some((roots, target_errors)) = target_roots(pkg, &opts.targets)? else {
+        // Lake's behavior (and wording) when nothing is selected
+        println!(
+            "warning: no targets specified and no default targets configured\n  \
+             Note: This will be an error in a future version of Lake.\n  \
+             Hint: This warning (or error) can be suppressed with '--allow-empty'."
+        );
+        return Ok(true);
+    };
+    let flume_dir = pkg.root.join(".lake").join("flume");
+    let _lock = BuildLock::acquire(&flume_dir.join("lock"))
+        .map_err(|e| format!("cannot lock {}: {e}", flume_dir.display()))?;
+    let state_path = flume_dir.join("state.json");
     let state = State::load(&state_path, &tc.githash);
     let mut sources = HashMap::new();
-    let g = discover(pkg, tc, &state, &opts.targets, &mut sources)?;
+    let g = discover(pkg, &state, roots, &mut sources);
     let n = g.mods.len();
     let shared = Shared {
         pkg,
@@ -896,15 +1036,21 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
             sc.spawn(|| shared.worker());
         }
     });
-    let s = shared.sched.into_inner().unwrap();
+    let s = shared.sched.into_inner().unwrap_or_else(|e| e.into_inner());
+    for e in &target_errors {
+        println!("✖ Collecting modules\nerror: {e}");
+    }
     let failed: Vec<&str> = (0..n)
         .filter(|&i| s.status[i] == Status::Failed)
         .map(|i| g.mods[i].name.as_str())
         .collect();
     // persist what changed
-    let sources_changed = sources
-        .iter()
-        .any(|(k, v)| state.sources.get(k).is_none_or(|o| o.stat != v.stat));
+    let sources_changed = sources.iter().any(|(k, v)| {
+        state
+            .sources
+            .get(k)
+            .is_none_or(|o| o.stat != v.stat || o.racy != v.racy)
+    });
     if sources_changed || !s.new_built.is_empty() {
         let mut new_state = state.clone();
         new_state.sources.extend(sources);
@@ -922,7 +1068,7 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
             .save(&state_path)
             .map_err(|e| format!("cannot write {}: {e}", state_path.display()))?;
     }
-    if failed.is_empty() {
+    if failed.is_empty() && target_errors.is_empty() {
         println!("Build completed successfully ({} jobs).", s.compiled);
         Ok(true)
     } else {
@@ -932,5 +1078,48 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
         }
         println!("error: build failed");
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crlf_is_ignored_in_source_hashes() {
+        assert_eq!(source_hash(b"a\r\nb\r\n"), source_hash(b"a\nb\n"));
+        assert_ne!(source_hash(b"a\rb"), source_hash(b"a\nb"));
+    }
+
+    fn module(deps: Vec<usize>) -> Module {
+        Module {
+            name: String::new(),
+            comps: vec![],
+            file: PathBuf::new(),
+            rel_file: String::new(),
+            lib: 0,
+            is_module: true,
+            src_hash: String::new(),
+            error: None,
+            imports: vec![],
+            deps,
+            dependents: vec![],
+            height: 0,
+        }
+    }
+
+    #[test]
+    fn cycles() {
+        // 0 <- 1 <- 2 <- 1 (cycle 1,2), 3 imports itself, 4 imports 2
+        let mods = vec![
+            module(vec![]),
+            module(vec![0, 2]),
+            module(vec![1]),
+            module(vec![3]),
+            module(vec![2]),
+        ];
+        let mut c = cycle_members(&mods);
+        c.sort();
+        assert_eq!(c, vec![1, 2, 3]);
     }
 }
