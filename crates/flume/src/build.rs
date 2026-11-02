@@ -34,7 +34,15 @@ use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 const KEY_VERSION: &str = "flume-key-1";
-const MODULE_FACETS: [&str; 7] = ["olean", "olean.server", "olean.private", "ilean", "ir", "ir.sig", "c"];
+const MODULE_FACETS: [&str; 7] = [
+    "olean",
+    "olean.server",
+    "olean.private",
+    "ilean",
+    "ir",
+    "ir.sig",
+    "c",
+];
 const LEGACY_FACETS: [&str; 3] = ["olean", "ilean", "c"];
 
 pub struct Options {
@@ -90,6 +98,12 @@ struct Done {
 
 type Hash = [u8; 32];
 
+/// facet -> content hash of a module's outputs
+type Outputs = Vec<(String, String)>;
+
+/// A successful compilation: outputs, the `.olean`'s status, messages, milliseconds.
+type Compiled = (Outputs, FileStat, Vec<String>, u128);
+
 fn mix(parts: &[&[u8]]) -> Hash {
     let mut h = blake3::Hasher::new();
     for p in parts {
@@ -100,7 +114,11 @@ fn mix(parts: &[&[u8]]) -> Hash {
 }
 
 pub fn facets(is_module: bool) -> &'static [&'static str] {
-    if is_module { &MODULE_FACETS } else { &LEGACY_FACETS }
+    if is_module {
+        &MODULE_FACETS
+    } else {
+        &LEGACY_FACETS
+    }
 }
 
 pub fn artifact_path(pkg: &Package, comps: &[String], facet: &str) -> PathBuf {
@@ -153,7 +171,9 @@ fn lib_modules(lib: &Lib) -> Result<Vec<Vec<String>>, String> {
 }
 
 fn walk(dir: &Path, prefix: &[String], out: &mut Vec<Vec<String>>) -> Result<(), String> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(()) };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
     for e in rd {
         let e = e.map_err(|e| e.to_string())?;
         let name = e.file_name().to_string_lossy().to_string();
@@ -175,8 +195,13 @@ struct Graph {
     mods: Vec<Module>,
 }
 
-fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
-            sources: &mut HashMap<String, SourceInfo>) -> Result<Graph, String> {
+fn discover(
+    pkg: &Package,
+    tc: &Toolchain,
+    state: &State,
+    targets: &[String],
+    sources: &mut HashMap<String, SourceInfo>,
+) -> Result<Graph, String> {
     let mut roots: Vec<(Vec<String>, Option<usize>)> = Vec::new();
     let names: Vec<String> = if !targets.is_empty() {
         targets.to_vec()
@@ -205,7 +230,9 @@ fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
             continue;
         }
         let lib = lib_hint.or_else(|| {
-            pkg.libs.iter().position(|l| l.is_local_module(&comps) && module_file(l, &comps).is_file())
+            pkg.libs
+                .iter()
+                .position(|l| l.is_local_module(&comps) && module_file(l, &comps).is_file())
         });
         let Some(li) = lib else {
             let mut olean = toolchain_lib.clone();
@@ -223,11 +250,13 @@ fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
         };
         let file = module_file(&pkg.libs[li], &comps);
         let name = header::name_to_string(&comps);
-        let stat = FileStat::of(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        let stat =
+            FileStat::of(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
         let info = match state.sources.get(&name) {
             Some(s) if s.stat == stat => s.clone(),
             _ => {
-                let bytes = std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+                let bytes = std::fs::read(&file)
+                    .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
                 let text = String::from_utf8_lossy(&bytes);
                 let h = header::parse(&text).map_err(|e| {
                     let line = text[..e.pos.min(text.len())].matches('\n').count() + 1;
@@ -240,12 +269,21 @@ fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
                     imports: h
                         .imports
                         .into_iter()
-                        .map(|i| StoredImport { module: i.module, all: i.all, exported: i.exported, meta: i.meta })
+                        .map(|i| StoredImport {
+                            module: i.module,
+                            all: i.all,
+                            exported: i.exported,
+                            meta: i.meta,
+                        })
                         .collect(),
                 }
             }
         };
-        let rel_file = file.strip_prefix(&pkg.root).unwrap_or(&file).to_string_lossy().to_string();
+        let rel_file = file
+            .strip_prefix(&pkg.root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .to_string();
         let imps: Vec<StoredImport> = info.imports.clone();
         for imp in &imps {
             if !index.contains_key(&imp.module) {
@@ -273,7 +311,12 @@ fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
         mods[i].imports = imps
             .iter()
             .filter_map(|imp| {
-                index.get(&imp.module).map(|&idx| LocalImport { idx, all: imp.all, exported: imp.exported, meta: imp.meta })
+                index.get(&imp.module).map(|&idx| LocalImport {
+                    idx,
+                    all: imp.all,
+                    exported: imp.exported,
+                    meta: imp.meta,
+                })
             })
             .collect();
         let mut deps: Vec<usize> = mods[i].imports.iter().map(|li| li.idx).collect();
@@ -300,11 +343,20 @@ fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
         }
     }
     if order.len() != n {
-        let stuck: Vec<&str> = (0..n).filter(|&i| indeg[i] > 0).take(5).map(|i| mods[i].name.as_str()).collect();
+        let stuck: Vec<&str> = (0..n)
+            .filter(|&i| indeg[i] > 0)
+            .take(5)
+            .map(|i| mods[i].name.as_str())
+            .collect();
         return Err(format!("import cycle among: {}", stuck.join(", ")));
     }
     for &i in order.iter().rev() {
-        let h = mods[i].dependents.iter().map(|&j| mods[j].height + 1).max().unwrap_or(0);
+        let h = mods[i]
+            .dependents
+            .iter()
+            .map(|&j| mods[j].height + 1)
+            .max()
+            .unwrap_or(0);
         mods[i].height = h;
     }
     Ok(Graph { mods })
@@ -312,13 +364,23 @@ fn discover(pkg: &Package, tc: &Toolchain, state: &State, targets: &[String],
 
 /// Lake's `arts` / `allArts` of a module, as paths.
 fn import_arts(pkg: &Package, m: &Module, all: bool) -> Vec<Vec<String>> {
-    let p = |f: &str| artifact_path(pkg, &m.comps, f).to_string_lossy().to_string();
+    let p = |f: &str| {
+        artifact_path(pkg, &m.comps, f)
+            .to_string_lossy()
+            .to_string()
+    };
     if !m.is_module {
         vec![vec![p("olean")]]
     } else if all {
-        vec![vec![p("olean"), p("olean.server"), p("olean.private")], vec![p("ir.sig"), p("ir")]]
+        vec![
+            vec![p("olean"), p("olean.server"), p("olean.private")],
+            vec![p("ir.sig"), p("ir")],
+        ]
     } else {
-        vec![vec![p("olean"), p("olean.server")], vec![p("ir.sig"), p("ir")]]
+        vec![
+            vec![p("olean"), p("olean.server")],
+            vec![p("ir.sig"), p("ir")],
+        ]
     }
 }
 
@@ -355,7 +417,11 @@ fn setup_import_arts(g: &Graph, m: &Module) -> Vec<(usize, bool)> {
             let ia = non_module || (all && imp.all);
             let nm = meta || (reachable && imp.meta);
             if reachable || nm {
-                q.push(Entry { idx: imp.idx, all: ia, meta: nm });
+                q.push(Entry {
+                    idx: imp.idx,
+                    all: ia,
+                    meta: nm,
+                });
             }
         }
     };
@@ -382,7 +448,7 @@ fn setup_import_arts(g: &Graph, m: &Module) -> Vec<(usize, bool)> {
         if meta {
             meta_visited.insert(idx);
         }
-        let had_all = existing.map_or(false, |k| s[k].1 && g.mods[idx].is_module);
+        let had_all = existing.is_some_and(|k| s[k].1 && g.mods[idx].is_module);
         let want_all = all_visited.contains(&idx) || had_all;
         match existing {
             Some(k) => s[k].1 = want_all,
@@ -429,7 +495,9 @@ impl Shared<'_> {
         put(KEY_VERSION.as_bytes());
         put(self.tc.githash.as_bytes());
         put(self.pkg.name.as_bytes());
-        put(serde_json::to_string(&lib.options).unwrap_or_default().as_bytes());
+        put(serde_json::to_string(&lib.options)
+            .unwrap_or_default()
+            .as_bytes());
         put(lib.lean_args.join("\0").as_bytes());
         put(m.name.as_bytes());
         put(m.src_hash.as_bytes());
@@ -456,18 +524,39 @@ impl Shared<'_> {
     /// Lake's `ModuleExportInfo` traces of a finished module.
     fn export_info(&self, i: usize, outputs: &[(String, String)], done: &[Done]) -> Done {
         let m = &self.g.mods[i];
-        let out = |f: &str| outputs.iter().find(|(k, _)| k == f).map(|(_, v)| v.as_bytes()).unwrap_or(b"");
+        let out = |f: &str| {
+            outputs
+                .iter()
+                .find(|(k, _)| k == f)
+                .map(|(_, v)| v.as_bytes())
+                .unwrap_or(b"")
+        };
         let (arts, meta_arts, all_arts) = if m.is_module {
             (
                 mix(&[b"arts", out("olean")]),
                 mix(&[b"meta", out("olean"), out("ir.sig"), out("ir")]),
-                mix(&[b"all", out("olean"), out("olean.server"), out("olean.private"), out("ir.sig"), out("ir")]),
+                mix(&[
+                    b"all",
+                    out("olean"),
+                    out("olean.server"),
+                    out("olean.private"),
+                    out("ir.sig"),
+                    out("ir"),
+                ]),
             )
         } else {
-            (mix(&[b"arts", out("olean")]), mix(&[b"meta", out("olean")]), mix(&[b"all", out("olean")]))
+            (
+                mix(&[b"arts", out("olean")]),
+                mix(&[b"meta", out("olean")]),
+                mix(&[b"all", out("olean")]),
+            )
         };
-        let (mut trans, mut meta_trans, mut all_trans, mut legacy_trans) =
-            (blake3::Hasher::new(), blake3::Hasher::new(), blake3::Hasher::new(), blake3::Hasher::new());
+        let (mut trans, mut meta_trans, mut all_trans, mut legacy_trans) = (
+            blake3::Hasher::new(),
+            blake3::Hasher::new(),
+            blake3::Hasher::new(),
+            blake3::Hasher::new(),
+        );
         for li in &m.imports {
             let d = &done[li.idx];
             legacy_trans.update(&d.legacy_trans);
@@ -484,7 +573,11 @@ impl Shared<'_> {
             meta_trans.update(&d.meta_trans);
             meta_trans.update(&d.meta_arts);
             if li.exported {
-                let (t, a) = if li.meta { (&d.meta_trans, &d.meta_arts) } else { (&d.trans, &d.arts) };
+                let (t, a) = if li.meta {
+                    (&d.meta_trans, &d.meta_arts)
+                } else {
+                    (&d.trans, &d.arts)
+                };
                 trans.update(t);
                 trans.update(a);
             }
@@ -502,7 +595,7 @@ impl Shared<'_> {
 
     /// The remembered outputs if the module is up to date; also a refreshed record when
     /// the `.olean`'s file status changed but its content did not (e.g. a copied checkout).
-    fn up_to_date(&self, i: usize, key: &str) -> Option<(Vec<(String, String)>, Option<Built>)> {
+    fn up_to_date(&self, i: usize, key: &str) -> Option<(Outputs, Option<Built>)> {
         let m = &self.g.mods[i];
         let b = self.state.built.get(&m.name)?;
         if b.key != key {
@@ -519,7 +612,14 @@ impl Shared<'_> {
                 return None;
             }
         }
-        Some((b.outputs.clone(), Some(Built { key: key.to_string(), outputs: b.outputs.clone(), olean_stat: stat })))
+        Some((
+            b.outputs.clone(),
+            Some(Built {
+                key: key.to_string(),
+                outputs: b.outputs.clone(),
+                olean_stat: stat,
+            }),
+        ))
     }
 
     fn setup_json(&self, i: usize) -> Json {
@@ -541,7 +641,7 @@ impl Shared<'_> {
         })
     }
 
-    fn compile(&self, i: usize) -> Result<(Vec<(String, String)>, FileStat, Vec<String>, u128), (Vec<String>, String)> {
+    fn compile(&self, i: usize) -> Result<Compiled, (Vec<String>, String)> {
         let m = &self.g.mods[i];
         let lib = &self.pkg.libs[m.lib];
         let olean = artifact_path(self.pkg, &m.comps, "olean");
@@ -559,16 +659,23 @@ impl Shared<'_> {
         for f in MODULE_FACETS.iter().chain(["ltar", "bc"].iter()) {
             let _ = std::fs::remove_file(artifact_path(self.pkg, &m.comps, f));
         }
-        if let Err(e) = std::fs::write(&setup, serde_json::to_vec_pretty(&self.setup_json(i)).unwrap_or_default()) {
+        if let Err(e) = std::fs::write(
+            &setup,
+            serde_json::to_vec_pretty(&self.setup_json(i)).unwrap_or_default(),
+        ) {
             return fail(vec![], format!("cannot write {}: {e}", setup.display()));
         }
         let mut cmd = Command::new(&self.tc.lean);
         cmd.args(&lib.lean_args)
             .arg(&m.file)
-            .arg("-o").arg(&olean)
-            .arg("-i").arg(&ilean)
-            .arg("-c").arg(&c)
-            .arg("--setup").arg(&setup)
+            .arg("-o")
+            .arg(&olean)
+            .arg("-i")
+            .arg(&ilean)
+            .arg("-c")
+            .arg(&c)
+            .arg("--setup")
+            .arg(&setup)
             .arg("--json")
             .env("LEAN_PATH", &self.pkg.lib_dir)
             .current_dir(&self.pkg.root)
@@ -576,11 +683,19 @@ impl Shared<'_> {
         let t0 = Instant::now();
         let out = match cmd.output() {
             Ok(o) => o,
-            Err(e) => return fail(vec![], format!("cannot run {}: {e}", self.tc.lean.display())),
+            Err(e) => {
+                return fail(
+                    vec![],
+                    format!("cannot run {}: {e}", self.tc.lean.display()),
+                )
+            }
         };
         let ms = t0.elapsed().as_millis();
         let mut msgs = Vec::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines().chain(String::from_utf8_lossy(&out.stderr).lines()) {
+        for line in String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&out.stderr).lines())
+        {
             if line.trim().is_empty() {
                 continue;
             }
@@ -642,7 +757,11 @@ impl Shared<'_> {
                             s.compiled
                         };
                         let warn = msgs.iter().any(|l| l.starts_with("warning:"));
-                        let mut text = format!("{} [{n}/{total}] Built {} ({ms}ms)\n", if warn { "⚠" } else { "✔" }, m.name);
+                        let mut text = format!(
+                            "{} [{n}/{total}] Built {} ({ms}ms)\n",
+                            if warn { "⚠" } else { "✔" },
+                            m.name
+                        );
                         if warn || self.verbose {
                             for l in &msgs {
                                 text.push_str(l);
@@ -650,7 +769,11 @@ impl Shared<'_> {
                             }
                         }
                         self.print(&text);
-                        let b = Built { key: key.clone(), outputs: outputs.clone(), olean_stat: stat };
+                        let b = Built {
+                            key: key.clone(),
+                            outputs: outputs.clone(),
+                            olean_stat: stat,
+                        };
                         (Status::Built, outputs, Some(Some(b)))
                     }
                     Err((msgs, err)) => {
@@ -688,7 +811,11 @@ impl Shared<'_> {
                 for &d in &self.g.mods[j].dependents {
                     s.pending[d] -= 1;
                     if s.pending[d] == 0 {
-                        let blocked = bad || self.g.mods[d].deps.iter().any(|&x| matches!(s.status[x], Status::Failed | Status::Blocked));
+                        let blocked = bad
+                            || self.g.mods[d]
+                                .deps
+                                .iter()
+                                .any(|&x| matches!(s.status[x], Status::Failed | Status::Blocked));
                         if blocked {
                             // keep what was remembered about it: its inputs are unknown now
                             s.status[d] = Status::Blocked;
@@ -712,7 +839,11 @@ fn render_message(line: &str, rel_file: &str) -> String {
         Ok(Json::Object(o)) => {
             let sev = o.get("severity").and_then(Json::as_str).unwrap_or("info");
             let sev = if sev == "information" { "info" } else { sev };
-            let data = o.get("data").and_then(Json::as_str).unwrap_or("").trim_end();
+            let data = o
+                .get("data")
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .trim_end();
             match o.get("pos") {
                 Some(p) => format!(
                     "{sev}: {rel_file}:{}:{}: {data}",
@@ -766,9 +897,14 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
         }
     });
     let s = shared.sched.into_inner().unwrap();
-    let failed: Vec<&str> = (0..n).filter(|&i| s.status[i] == Status::Failed).map(|i| g.mods[i].name.as_str()).collect();
+    let failed: Vec<&str> = (0..n)
+        .filter(|&i| s.status[i] == Status::Failed)
+        .map(|i| g.mods[i].name.as_str())
+        .collect();
     // persist what changed
-    let sources_changed = sources.iter().any(|(k, v)| state.sources.get(k).map_or(true, |o| o.stat != v.stat));
+    let sources_changed = sources
+        .iter()
+        .any(|(k, v)| state.sources.get(k).is_none_or(|o| o.stat != v.stat));
     if sources_changed || !s.new_built.is_empty() {
         let mut new_state = state.clone();
         new_state.sources.extend(sources);
@@ -782,7 +918,9 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
                 }
             }
         }
-        new_state.save(&state_path).map_err(|e| format!("cannot write {}: {e}", state_path.display()))?;
+        new_state
+            .save(&state_path)
+            .map_err(|e| format!("cannot write {}: {e}", state_path.display()))?;
     }
     if failed.is_empty() {
         println!("Build completed successfully ({} jobs).", s.compiled);

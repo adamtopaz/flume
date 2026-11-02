@@ -59,7 +59,10 @@ fn is_letter_like(c: char) -> bool {
 
 fn is_sub_script_alnum(c: char) -> bool {
     let v = c as u32;
-    (0x2080..=0x2089).contains(&v) || (0x2090..=0x209c).contains(&v) || (0x1d62..=0x1d6a).contains(&v) || v == 0x2c7c
+    (0x2080..=0x2089).contains(&v)
+        || (0x2090..=0x209c).contains(&v)
+        || (0x1d62..=0x1d6a).contains(&v)
+        || v == 0x2c7c
 }
 
 fn is_id_first(c: char) -> bool {
@@ -68,8 +71,15 @@ fn is_id_first(c: char) -> bool {
 
 fn is_id_rest_fast(c: char) -> bool {
     c.is_ascii_alphanumeric()
-        || (c != '.' && c != '\n' && c != ' '
-            && (c == '_' || c == '\'' || c == '!' || c == '?' || is_letter_like(c) || is_sub_script_alnum(c)))
+        || (c != '.'
+            && c != '\n'
+            && c != ' '
+            && (c == '_'
+                || c == '\''
+                || c == '!'
+                || c == '?'
+                || is_letter_like(c)
+                || is_sub_script_alnum(c)))
 }
 
 impl<'a> P<'a> {
@@ -234,7 +244,12 @@ impl<'a> P<'a> {
                 break;
             }
         }
-        self.imports.push(Import { module: comps, all: self.all, exported: self.exported, meta: self.meta });
+        self.imports.push(Import {
+            module: comps,
+            all: self.all,
+            exported: self.exported,
+            meta: self.meta,
+        });
         self.whitespace();
         self.meta = false;
         self.all = false;
@@ -246,10 +261,18 @@ impl<'a> P<'a> {
             let start = self.pos;
             // atomic(`public`? `meta`? `import`)
             if self.keyword("public") {
-                if self.is_module { self.exported = true } else { self.bad_modifier = true }
+                if self.is_module {
+                    self.exported = true
+                } else {
+                    self.bad_modifier = true
+                }
             }
             if self.keyword("meta") {
-                if self.is_module { self.meta = true } else { self.bad_modifier = true }
+                if self.is_module {
+                    self.meta = true
+                } else {
+                    self.bad_modifier = true
+                }
             }
             if self.error.is_none() && !self.keyword("import") {
                 self.err("`import` expected");
@@ -258,7 +281,11 @@ impl<'a> P<'a> {
                 self.pos = start;
             } else {
                 if self.keyword("all") {
-                    if self.is_module { self.all = true } else { self.bad_modifier = true }
+                    if self.is_module {
+                        self.all = true
+                    } else {
+                        self.bad_modifier = true
+                    }
                 }
                 if self.error.is_none() {
                     self.module_ident();
@@ -281,7 +308,12 @@ impl<'a> P<'a> {
 }
 
 fn init_import(meta: bool) -> Import {
-    Import { module: vec!["Init".to_string()], all: false, exported: true, meta }
+    Import {
+        module: vec!["Init".to_string()],
+        all: false,
+        exported: true,
+        meta,
+    }
 }
 
 /// Parse the header of a Lean source file.
@@ -311,7 +343,10 @@ pub fn parse(input: &str) -> Result<Header, ParseError> {
     }
     match p.error {
         Some(msg) => Err(ParseError { pos: p.pos, msg }),
-        None => Ok(Header { is_module: p.is_module, imports: p.imports }),
+        None => Ok(Header {
+            is_module: p.is_module,
+            imports: p.imports,
+        }),
     }
 }
 
@@ -325,7 +360,11 @@ pub fn name_to_string(comps: &[String]) -> String {
                 Some(f) => is_id_first(f) && chars.all(is_id_rest_fast),
                 None => false,
             };
-            if ok { c.clone() } else { format!("«{c}»") }
+            if ok {
+                c.clone()
+            } else {
+                format!("«{c}»")
+            }
         })
         .collect::<Vec<_>>()
         .join(".")
@@ -336,7 +375,10 @@ mod tests {
     use super::*;
 
     fn names(h: &Header) -> Vec<(String, bool, bool, bool)> {
-        h.imports.iter().map(|i| (name_to_string(&i.module), i.exported, i.meta, i.all)).collect()
+        h.imports
+            .iter()
+            .map(|i| (name_to_string(&i.module), i.exported, i.meta, i.all))
+            .collect()
     }
 
     #[test]
@@ -381,9 +423,15 @@ mod tests {
     #[test]
     fn escapes_and_modifiers_without_module() {
         let h = parse("import «weird name».X\n").unwrap();
-        assert_eq!(h.imports[2].module, vec!["weird name".to_string(), "X".to_string()]);
+        assert_eq!(
+            h.imports[2].module,
+            vec!["weird name".to_string(), "X".to_string()]
+        );
         let e = parse("public import X\n").unwrap_err();
-        assert_eq!(e.msg, "cannot use 'public', 'meta', or 'all' without 'module'");
+        assert_eq!(
+            e.msg,
+            "cannot use 'public', 'meta', or 'all' without 'module'"
+        );
         assert!(parse("import\n").is_err());
         assert!(parse("\timport X").is_err());
     }

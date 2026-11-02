@@ -27,7 +27,10 @@ fn elan_home() -> Option<PathBuf> {
 }
 
 fn toolchain_name(project: &Path) -> Option<(String, PathBuf)> {
-    if let Some(t) = std::env::var("ELAN_TOOLCHAIN").ok().filter(|v| !v.trim().is_empty()) {
+    if let Some(t) = std::env::var("ELAN_TOOLCHAIN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
         return Some((t.trim().to_string(), project.to_path_buf()));
     }
     let mut dir = project.canonicalize().ok()?;
@@ -53,7 +56,10 @@ fn from_elan(project: &Path) -> Option<PathBuf> {
     }
     let home = elan_home()?;
     let dir = match name.split_once(':') {
-        Some((origin, release)) => home.join("toolchains").join(format!("{}---{}", origin.replace('/', "--"), release)),
+        Some((origin, release)) => {
+            home.join("toolchains")
+                .join(format!("{}---{}", origin.replace('/', "--"), release))
+        }
         None => home.join("toolchains").join(&name),
     };
     if dir.join("bin").join("lean").is_file() {
@@ -70,7 +76,10 @@ fn print_prefix(project: &Path) -> Result<PathBuf, String> {
         .output()
         .map_err(|e| format!("cannot run `lean --print-prefix` to find the Lean toolchain: {e}"))?;
     if !out.status.success() {
-        return Err(format!("`lean --print-prefix` failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "`lean --print-prefix` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
@@ -80,11 +89,16 @@ fn print_prefix(project: &Path) -> Result<PathBuf, String> {
 fn olean_identity(init_olean: &Path) -> Option<(String, String)> {
     use std::io::Read;
     let mut buf = [0u8; 80];
-    std::fs::File::open(init_olean).ok()?.read_exact(&mut buf).ok()?;
+    std::fs::File::open(init_olean)
+        .ok()?
+        .read_exact(&mut buf)
+        .ok()?;
     if &buf[0..5] != b"olean" {
         return None;
     }
-    let version = String::from_utf8_lossy(&buf[7..40]).trim_end_matches('\0').to_string();
+    let version = String::from_utf8_lossy(&buf[7..40])
+        .trim_end_matches('\0')
+        .to_string();
     let githash = std::str::from_utf8(&buf[40..80]).ok()?.to_string();
     if githash.len() == 40 && githash.bytes().all(|b| b.is_ascii_hexdigit()) {
         Some((githash, version))
@@ -105,12 +119,24 @@ pub fn detect(project: &Path) -> Result<Toolchain, String> {
     if !lean.is_file() {
         return Err(format!("no Lean executable at {}", lean.display()));
     }
-    let (githash, version) = match olean_identity(&sysroot.join("lib").join("lean").join("Init.olean")) {
-        Some(id) => id,
-        None => {
-            let out = Command::new(&lean).arg("--githash").output().map_err(|e| format!("cannot run {}: {e}", lean.display()))?;
-            (String::from_utf8_lossy(&out.stdout).trim().to_string(), String::new())
-        }
-    };
-    Ok(Toolchain { sysroot, lean, githash, version })
+    let (githash, version) =
+        match olean_identity(&sysroot.join("lib").join("lean").join("Init.olean")) {
+            Some(id) => id,
+            None => {
+                let out = Command::new(&lean)
+                    .arg("--githash")
+                    .output()
+                    .map_err(|e| format!("cannot run {}: {e}", lean.display()))?;
+                (
+                    String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                    String::new(),
+                )
+            }
+        };
+    Ok(Toolchain {
+        sysroot,
+        lean,
+        githash,
+        version,
+    })
 }

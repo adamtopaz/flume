@@ -50,7 +50,7 @@ whose artifacts ever differ, whose builds fail, or which leaves processes behind
 is INCORRECT regardless of speed.
 
 Build servers: a tool may run a persistent server. It advertises one by
-printing `blake-server 1` for `<exe> server protocol`; the harness then starts it
+printing `flume-server 1` for `<exe> server protocol`; the harness then starts it
 with `<exe> server start` (in its own systemd scope, under the same caps) and
 measures the single-checkout and many-checkouts scenarios a second time with the
 server warm (scenario names get the suffix `@warm`; every tool is measured again
@@ -147,7 +147,7 @@ SUITES = {
     "milestone": {"configs": ["medium-*", "large-layered"], "exclude": [], "repeat": 3, "repeat_fast": 10,
                   "sequential": False, "tools": "lake,blake,main,candidate"},
     "release": {"configs": ["huge-*"], "exclude": ["hub-interface", "swarm", "clone", "agents-4", "agents-16"],
-                "repeat": 1, "repeat_fast": 5, "sequential": True, "tools": "lake,blake,main,candidate"},
+                "repeat": 1, "repeat_fast": 5, "sequential": True, "tools": "lake,main,candidate"},
 }
 MODULE_FACETS = ("olean", "olean.server", "olean.private", "ilean", "ir", "ir.sig", "c")
 LEGACY_FACETS = ("olean", "ilean", "c")
@@ -162,7 +162,7 @@ NOISE_RULE = {"statistic": "median of paired per-repetition ratios main_i / cand
               "cold_threshold": COLD_THRESHOLD, "sequential_threshold": SEQUENTIAL_THRESHOLD}
 SCRUB_PREFIXES = ("LAKE_", "LEAN_")
 SCRUB_EXACT = ("LEAN", "ELAN_TOOLCHAIN", "XDG_CACHE_HOME", "TMPDIR", "CC", "AR", "CURL")
-SERVER_PROTOCOL = "blake-server 1"
+SERVER_PROTOCOL = "flume-server 1"
 
 
 def log(msg: str) -> None:
@@ -569,7 +569,7 @@ class ToolState:
 
     def unit(self, what: str) -> str:
         self.counter += 1
-        return f"blake-bench-{os.getpid()}-{self.name}-{what}-{self.counter}"
+        return f"flume-bench-{os.getpid()}-{self.name}-{what}-{self.counter}"
 
     def scoped(self, unit: str, cmd: list[str]) -> list[str]:
         if not self.use_scope:
@@ -621,8 +621,8 @@ class ToolState:
         stats_file = self.cache / f"stats-{unit}.txt"
         stats_file.unlink(missing_ok=True)
         env = dict(self.env)
-        env["BLAKE_BENCH_STATS"] = str(stats_file)
-        env["BLAKE_BENCH_SCOPED"] = "1" if self.use_scope else "0"
+        env["FLUME_BENCH_STATS"] = str(stats_file)
+        env["FLUME_BENCH_SCOPED"] = "1" if self.use_scope else "0"
         before = resource.getrusage(resource.RUSAGE_CHILDREN)
         t0 = time.perf_counter()
         timed_out = False
@@ -694,7 +694,7 @@ class ToolState:
         }
 
     def start_server(self, checkout: Path) -> bool:
-        unit = f"blake-bench-{os.getpid()}-{self.name}-server"
+        unit = f"flume-bench-{os.getpid()}-{self.name}-server"
         props = ["-p", f"MemoryMax={self.mem_gb}G"] if (self.use_scope and self.mem_gb) else []
         cmd = ([ "systemd-run", "--user", "--scope", "-q", f"--unit={unit}", *props, "--"] if self.use_scope else []) \
             + [self.tool["exe"], "server", "start"]

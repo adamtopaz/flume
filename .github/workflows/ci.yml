@@ -1,0 +1,83 @@
+# Correctness checks. This workflow never measures performance: hosted runners are
+# shared and noisy, and the research loop's verdict comes from the contributor's own
+# machine (instructions.md §6).
+#
+# Builds flume and the worker, runs the unit tests, clippy, and rustfmt, checks flume's
+# header parser against Lean's on the toolchain's own sources, and runs the benchmark's
+# quick suite against stock Lake: every artifact byte-identical, every build ok, and the
+# breaking edits failing exactly as in Lake.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Build, tests, header oracle, artifact identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache the Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan/toolchains
+          key: elan-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}
+
+      - name: Install the pinned toolchain
+        run: elan toolchain install "$(cat lean-toolchain)"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('crates/**') }}
+          restore-keys: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Build and test flume
+        run: |
+          cargo --version
+          cargo build --release --locked
+          cargo test --release --locked
+          cargo clippy --release --locked -- -D warnings
+          cargo fmt --check
+
+      - name: Build the worker
+        run: cd worker && lake build
+
+      - name: flume's header parser agrees with Lean's
+        run: python3 tests/check_headers.py
+
+      - name: Artifacts identical to stock Lake, breaking edits fail alike
+        run: |
+          python3 bench/harness/run.py --suite quick --tools lake,candidate \
+            --cpus 0-3 --mem-gb 8 --label ci
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ github.run_id }}
+          path: bench/work/results
+          if-no-files-found: ignore

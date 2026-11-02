@@ -25,7 +25,11 @@ fn default_jobs() -> usize {
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
 }
 
 fn run() -> Result<i32, String> {
@@ -46,7 +50,9 @@ fn run() -> Result<i32, String> {
                 if args.len() < 2 {
                     return Err(USAGE.into());
                 }
-                jobs = args[1].parse().map_err(|_| format!("-j expects a number, got {}", args[1]))?;
+                jobs = args[1]
+                    .parse()
+                    .map_err(|_| format!("-j expects a number, got {}", args[1]))?;
                 args.drain(..2);
             }
             Some("-v") | Some("--verbose") => {
@@ -56,13 +62,24 @@ fn run() -> Result<i32, String> {
             _ => break,
         }
     }
-    let cmd = if args.is_empty() { "build".to_string() } else { args.remove(0) };
-    let root = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+    let cmd = if args.is_empty() {
+        "build".to_string()
+    } else {
+        args.remove(0)
+    };
+    let root = dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     match cmd.as_str() {
         "--version" | "version" => {
             let tc = toolchain::detect(&root).ok();
             match tc {
-                Some(tc) => println!("flume {} (Lean {}, commit {})", env!("CARGO_PKG_VERSION"), tc.version, tc.githash),
+                Some(tc) => println!(
+                    "flume {} (Lean {}, commit {})",
+                    env!("CARGO_PKG_VERSION"),
+                    tc.version,
+                    tc.githash
+                ),
                 None => println!("flume {}", env!("CARGO_PKG_VERSION")),
             }
             Ok(0)
@@ -70,14 +87,27 @@ fn run() -> Result<i32, String> {
         "build" => {
             let pkg = config::load(&root)?;
             let tc = toolchain::detect(&root)?;
-            let ok = build::build(&pkg, &tc, &build::Options { targets: args, jobs, verbose })?;
+            let ok = build::build(
+                &pkg,
+                &tc,
+                &build::Options {
+                    targets: args,
+                    jobs,
+                    verbose,
+                },
+            )?;
             Ok(if ok { 0 } else { 1 })
         }
         "query" => {
             let pkg = config::load(&root)?;
             for t in &args {
-                let (m, facet) = t.rsplit_once(':').ok_or_else(|| format!("expected MOD:FACET, got {t}"))?;
-                println!("{}", build::artifact_path(&pkg, &config::split_name(m), facet).display());
+                let (m, facet) = t
+                    .rsplit_once(':')
+                    .ok_or_else(|| format!("expected MOD:FACET, got {t}"))?;
+                println!(
+                    "{}",
+                    build::artifact_path(&pkg, &config::split_name(m), facet).display()
+                );
             }
             Ok(0)
         }
@@ -85,7 +115,8 @@ fn run() -> Result<i32, String> {
             let pkg = config::load(&root)?;
             for p in [pkg.build_dir.clone(), root.join(".lake").join("flume")] {
                 if p.exists() {
-                    std::fs::remove_dir_all(&p).map_err(|e| format!("cannot remove {}: {e}", p.display()))?;
+                    std::fs::remove_dir_all(&p)
+                        .map_err(|e| format!("cannot remove {}: {e}", p.display()))?;
                 }
             }
             Ok(0)

@@ -43,7 +43,9 @@ impl Glob {
 }
 
 pub fn split_name(s: &str) -> Vec<String> {
-    s.split('.').map(|c| c.trim_matches(|ch| ch == '«' || ch == '»').to_string()).collect()
+    s.split('.')
+        .map(|c| c.trim_matches(|ch| ch == '«' || ch == '»').to_string())
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -83,7 +85,11 @@ fn strings(v: Option<&Value>, what: &str) -> Result<Vec<String>, String> {
         None => Ok(Vec::new()),
         Some(Value::Array(a)) => a
             .iter()
-            .map(|x| x.as_str().map(str::to_string).ok_or_else(|| format!("`{what}` must be a list of strings")))
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("`{what}` must be a list of strings"))
+            })
             .collect(),
         Some(Value::String(s)) => Ok(vec![s.clone()]),
         Some(_) => Err(format!("`{what}` must be a list of strings")),
@@ -99,9 +105,17 @@ fn options(v: Option<&Value>) -> Result<Map<String, Json>, String> {
     Ok(out)
 }
 
-fn flatten_options(prefix: &str, t: &toml::Table, out: &mut Map<String, Json>) -> Result<(), String> {
+fn flatten_options(
+    prefix: &str,
+    t: &toml::Table,
+    out: &mut Map<String, Json>,
+) -> Result<(), String> {
     for (k, v) in t {
-        let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        let key = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{prefix}.{k}")
+        };
         match v {
             Value::Table(sub) => flatten_options(&key, sub, out)?,
             Value::Boolean(b) => {
@@ -131,47 +145,82 @@ pub fn load(root: &Path) -> Result<Package, String> {
     let toml_path = root.join("lakefile.toml");
     if !toml_path.is_file() {
         if root.join("lakefile.lean").is_file() {
-            return Err("this project is configured in lakefile.lean, which flume does not read yet \
+            return Err(
+                "this project is configured in lakefile.lean, which flume does not read yet \
                         (roadmap milestone M2); only lakefile.toml is supported"
-                .into());
+                    .into(),
+            );
         }
         return Err(format!("no lakefile.toml in {}", root.display()));
     }
-    let text = std::fs::read_to_string(&toml_path).map_err(|e| format!("cannot read {}: {e}", toml_path.display()))?;
-    let t: toml::Table = text.parse().map_err(|e| format!("{}: {e}", toml_path.display()))?;
-    let name = t.get("name").and_then(Value::as_str).ok_or("lakefile.toml has no package `name`")?.to_string();
+    let text = std::fs::read_to_string(&toml_path)
+        .map_err(|e| format!("cannot read {}: {e}", toml_path.display()))?;
+    let t: toml::Table = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", toml_path.display()))?;
+    let name = t
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or("lakefile.toml has no package `name`")?
+        .to_string();
     if t.get("require").is_some() {
-        return Err("dependencies (`[[require]]`) are not supported yet (roadmap milestone M2)".into());
+        return Err(
+            "dependencies (`[[require]]`) are not supported yet (roadmap milestone M2)".into(),
+        );
     }
     let src_dir = root.join(str_or(&t, "srcDir", ".")?);
     let build_dir = root.join(str_or(&t, "buildDir", ".lake/build")?);
     let lib_dir = build_dir.join(str_or(&t, "leanLibDir", "lib/lean")?);
     let ir_dir = build_dir.join(str_or(&t, "irDir", "ir")?);
     let pkg_options = options(t.get("leanOptions"))?;
-    let pkg_args = [strings(t.get("weakLeanArgs"), "weakLeanArgs")?, strings(t.get("moreLeanArgs"), "moreLeanArgs")?].concat();
-    for key in ["precompileModules", "platformIndependent", "moreLeancArgs", "moreLinkArgs", "extraDepTargets"] {
+    let pkg_args = [
+        strings(t.get("weakLeanArgs"), "weakLeanArgs")?,
+        strings(t.get("moreLeanArgs"), "moreLeanArgs")?,
+    ]
+    .concat();
+    for key in [
+        "precompileModules",
+        "platformIndependent",
+        "moreLeancArgs",
+        "moreLinkArgs",
+        "extraDepTargets",
+    ] {
         if t.get(key).is_some() {
             return Err(format!("package option `{key}` is not supported yet"));
         }
     }
     let mut libs = Vec::new();
     if let Some(v) = t.get("lean_lib") {
-        let arr = v.as_array().ok_or("`lean_lib` must be an array of tables")?;
+        let arr = v
+            .as_array()
+            .ok_or("`lean_lib` must be an array of tables")?;
         for l in arr {
             let lt = l.as_table().ok_or("`lean_lib` entries must be tables")?;
-            let lname = lt.get("name").and_then(Value::as_str).ok_or("a `lean_lib` has no `name`")?.to_string();
-            let mut roots: Vec<Vec<String>> = strings(lt.get("roots"), "roots")?.iter().map(|s| split_name(s)).collect();
+            let lname = lt
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("a `lean_lib` has no `name`")?
+                .to_string();
+            let mut roots: Vec<Vec<String>> = strings(lt.get("roots"), "roots")?
+                .iter()
+                .map(|s| split_name(s))
+                .collect();
             if roots.is_empty() {
                 roots.push(split_name(&lname));
             }
-            let mut globs: Vec<Glob> = strings(lt.get("globs"), "globs")?.iter().map(|s| Glob::parse(s)).collect();
+            let mut globs: Vec<Glob> = strings(lt.get("globs"), "globs")?
+                .iter()
+                .map(|s| Glob::parse(s))
+                .collect();
             if globs.is_empty() {
                 globs = roots.iter().cloned().map(Glob::One).collect();
             }
             let mut opts = pkg_options.clone();
             opts.extend(options(lt.get("leanOptions"))?);
             if opts.contains_key("compiler.postponeCompile") {
-                return Err("the Lean option `compiler.postponeCompile` is not supported yet".into());
+                return Err(
+                    "the Lean option `compiler.postponeCompile` is not supported yet".into(),
+                );
             }
             let lib_src = match lt.get("srcDir") {
                 Some(Value::String(s)) => src_dir.join(s),
@@ -184,16 +233,31 @@ pub fn load(root: &Path) -> Result<Package, String> {
                 strings(lt.get("moreLeanArgs"), "moreLeanArgs")?,
             ]
             .concat();
-            for key in ["precompileModules", "extraDepTargets", "needs", "nativeFacets"] {
+            for key in [
+                "precompileModules",
+                "extraDepTargets",
+                "needs",
+                "nativeFacets",
+            ] {
                 if lt.get(key).is_some() {
                     return Err(format!("`lean_lib` option `{key}` is not supported yet"));
                 }
             }
-            libs.push(Lib { name: lname, src_dir: lib_src, roots, globs, options: opts, lean_args });
+            libs.push(Lib {
+                name: lname,
+                src_dir: lib_src,
+                roots,
+                globs,
+                options: opts,
+                lean_args,
+            });
         }
     }
     let exes: Vec<String> = match t.get("lean_exe") {
-        Some(Value::Array(a)) => a.iter().filter_map(|e| e.get("name").and_then(Value::as_str).map(str::to_string)).collect(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|e| e.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect(),
         _ => Vec::new(),
     };
     let default_targets = strings(t.get("defaultTargets"), "defaultTargets")?;
@@ -202,7 +266,15 @@ pub fn load(root: &Path) -> Result<Package, String> {
             return Err(format!("default target `{target}` is an executable; `lean_exe` is not supported yet (roadmap milestone M7)"));
         }
     }
-    Ok(Package { name, root: root.to_path_buf(), build_dir, lib_dir, ir_dir, default_targets, libs })
+    Ok(Package {
+        name,
+        root: root.to_path_buf(),
+        build_dir,
+        lib_dir,
+        ir_dir,
+        default_targets,
+        libs,
+    })
 }
 
 #[cfg(test)]

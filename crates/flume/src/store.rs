@@ -40,7 +40,12 @@ impl FileStat {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as i128)
                 .unwrap_or(0);
-            Ok(FileStat { size: md.len(), mtime_ns: mtime, ctime_ns: 0, ino: 0 })
+            Ok(FileStat {
+                size: md.len(),
+                mtime_ns: mtime,
+                ctime_ns: 0,
+                ino: 0,
+            })
         }
     }
 }
@@ -80,8 +85,14 @@ pub struct State {
 
 impl State {
     pub fn load(path: &Path, githash: &str) -> State {
-        let fresh = State { version: STATE_VERSION, githash: githash.to_string(), ..Default::default() };
-        let Ok(bytes) = std::fs::read(path) else { return fresh };
+        let fresh = State {
+            version: STATE_VERSION,
+            githash: githash.to_string(),
+            ..Default::default()
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            return fresh;
+        };
         match serde_json::from_slice::<State>(&bytes) {
             Ok(s) if s.version == STATE_VERSION && s.githash == githash => s,
             _ => fresh,

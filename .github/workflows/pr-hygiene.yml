@@ -1,0 +1,29 @@
+# Checks a pull request against the research-loop rules (instructions.md), by title
+# prefix and diff. Separate from CI so that a title edit re-runs it cheaply.
+name: PR hygiene
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-hygiene-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: PR hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check the PR against the research-loop rules
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 ci/pr_check.py --base "origin/$BASE_REF" --title "$PR_TITLE"
