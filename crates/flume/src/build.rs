@@ -24,9 +24,15 @@
 //!    package's library directory, after removing the module's old outputs; the setup
 //!    file lists the import artifacts Lake would list (its `fetchTransImportArts` walk).
 //!    A compile fails if `lean` exits non-zero or logs an error.
-//! 4. **Scheduling.** A pool of `jobs` workers takes ready modules, tallest first
+//! 4. **The shared cache** (`cache.rs`). A successful compile's outputs are stored by
+//!    content and recorded under the module's key; a module that is not up to date but
+//!    whose key is in the cache gets those outputs linked into place instead of being
+//!    compiled, as Lake does with its artifact cache. The key covers everything that
+//!    determines the outputs and no paths, so any checkout may use any other's results.
+//! 5. **Scheduling.** A pool of `jobs` workers takes ready modules, tallest first
 //!    (longest chain of dependents), so the critical path starts as early as possible.
 
+use crate::cache::Cache;
 use crate::config::{Glob, Lib, Package};
 use crate::header;
 use crate::store::{BuildLock, Built, FileStat, SourceInfo, State, StoredImport};
@@ -88,6 +94,8 @@ enum Status {
     Pending,
     UpToDate,
     Built,
+    /// outputs linked from the shared cache
+    Restored,
     Failed,
     Blocked,
 }
@@ -562,6 +570,7 @@ struct Shared<'a> {
     tc: &'a Toolchain,
     g: &'a Graph,
     state: &'a State,
+    cache: Option<&'a Cache>,
     verbose: bool,
     sched: Mutex<Sched>,
     cv: Condvar,
@@ -738,11 +747,64 @@ impl Shared<'_> {
         })
     }
 
+    /// Like Lake (`Module.clearOutputArtifacts`): remove a module's old outputs before
+    /// compiling or restoring it, so a failed compile never leaves stale artifacts behind.
+    fn clear_outputs(&self, m: &Module) {
+        for f in MODULE_FACETS.iter().chain(["ltar", "bc"].iter()) {
+            let _ = std::fs::remove_file(artifact_path(self.pkg, &m.comps, f));
+        }
+    }
+
+    /// The status of each output, taken after everything that touches the files.
+    fn output_stats(&self, m: &Module) -> std::io::Result<Vec<(String, FileStat)>> {
+        facets(m.is_module)
+            .iter()
+            .map(|f| {
+                Ok((
+                    f.to_string(),
+                    FileStat::of(&artifact_path(self.pkg, &m.comps, f))?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Put the outputs the cache holds for `key` in place, if it holds all of them:
+    /// `Some((outputs, stats, messages))`. Content hashes come from the cache's entry, as
+    /// Lake trusts its own cache's records.
+    #[allow(clippy::type_complexity)]
+    fn restore(
+        &self,
+        i: usize,
+        key: &str,
+    ) -> Option<(Outputs, Vec<(String, FileStat)>, Vec<String>)> {
+        let cache = self.cache?;
+        let m = &self.g.mods[i];
+        let entry = cache.lookup(key)?;
+        let fs = facets(m.is_module);
+        let mut outputs = Vec::with_capacity(fs.len());
+        for f in fs {
+            let o = entry.outputs.iter().find(|o| o.facet == *f)?;
+            outputs.push((f.to_string(), o.hash.clone()));
+        }
+        if entry.outputs.len() != fs.len() {
+            return None;
+        }
+        self.clear_outputs(m);
+        // a failure leaves partial outputs, which the compile that follows removes
+        cache
+            .restore(&entry, |f| artifact_path(self.pkg, &m.comps, f))
+            .ok()?;
+        let stats = self.output_stats(m).ok()?;
+        Some((outputs, stats, entry.messages))
+    }
+
     /// Compile a module: `Ok((outputs, stats, messages, ms))` or `Err((messages, error))`.
+    /// A successful compile is stored in the cache under `key`.
     #[allow(clippy::type_complexity)]
     fn compile(
         &self,
         i: usize,
+        key: &str,
     ) -> Result<(Outputs, Vec<(String, FileStat)>, Vec<String>, u128), (Vec<String>, String)> {
         let m = &self.g.mods[i];
         let lib = &self.pkg.libs[m.lib];
@@ -755,11 +817,7 @@ impl Shared<'_> {
                 let _ = std::fs::create_dir_all(d);
             }
         }
-        // Like Lake (`Module.clearOutputArtifacts`): remove the old outputs first, so a
-        // failed compile never leaves stale artifacts behind.
-        for f in MODULE_FACETS.iter().chain(["ltar", "bc"].iter()) {
-            let _ = std::fs::remove_file(artifact_path(self.pkg, &m.comps, f));
-        }
+        self.clear_outputs(m);
         if let Err(e) = std::fs::write(
             &setup,
             serde_json::to_vec_pretty(&self.setup_json(i)).unwrap_or_default(),
@@ -807,19 +865,28 @@ impl Shared<'_> {
             return Err((msgs, String::new()));
         }
         let mut outputs = Vec::new();
-        let mut stats = Vec::new();
+        let mut files = Vec::new();
         for f in facets(m.is_module) {
             let p = artifact_path(self.pkg, &m.comps, f);
-            match (hash_file(&p), FileStat::of(&p)) {
-                (Ok(h), Ok(st)) => {
-                    outputs.push((f.to_string(), h));
-                    stats.push((f.to_string(), st));
+            match hash_file(&p) {
+                Ok(h) => {
+                    outputs.push((f.to_string(), h.clone()));
+                    files.push((f.to_string(), p, h));
                 }
-                (Err(e), _) | (_, Err(e)) => {
-                    return Err((msgs, format!("missing output {}: {e}", p.display())))
+                Err(e) => return Err((msgs, format!("missing output {}: {e}", p.display()))),
+            }
+        }
+        if let Some(cache) = self.cache {
+            // a cache that cannot be written costs speed later, never this build
+            if let Err(e) = cache.store(key, &files, &msgs) {
+                if self.verbose {
+                    self.print(&format!("warning: could not cache {}: {e}\n", m.name));
                 }
             }
         }
+        let stats = self
+            .output_stats(m)
+            .map_err(|e| (msgs.clone(), format!("missing output of {}: {e}", m.name)))?;
         Ok((outputs, stats, msgs, ms))
     }
 
@@ -864,7 +931,30 @@ impl Shared<'_> {
         if let Some((outputs, refreshed)) = self.up_to_date(i, &key) {
             return (Status::UpToDate, outputs, refreshed.map(Some));
         }
-        match self.compile(i) {
+        if let Some((outputs, stats, msgs)) = self.restore(i, &key) {
+            // Lake prints a replayed job only when its log has something to show
+            let warn = msgs.iter().any(|l| l.starts_with("warning:"));
+            if warn || self.verbose {
+                let n = self.next_count();
+                let mut text = format!(
+                    "{} [{n}/{total}] Replayed {}\n",
+                    if warn { "⚠" } else { "✔" },
+                    m.name
+                );
+                for l in &msgs {
+                    text.push_str(l);
+                    text.push('\n');
+                }
+                self.print(&text);
+            }
+            let b = Built {
+                key,
+                outputs: outputs.clone(),
+                stats,
+            };
+            return (Status::Restored, outputs, Some(Some(b)));
+        }
+        match self.compile(i, &key) {
             Ok((outputs, stats, msgs, ms)) => {
                 let n = self.next_count();
                 let warn = msgs.iter().any(|l| l.starts_with("warning:"));
@@ -1004,11 +1094,13 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
     let mut sources = HashMap::new();
     let g = discover(pkg, &state, roots, &mut sources);
     let n = g.mods.len();
+    let cache = Cache::from_env();
     let shared = Shared {
         pkg,
         tc,
         g: &g,
         state: &state,
+        cache: cache.as_ref(),
         verbose: opts.verbose,
         sched: Mutex::new(Sched {
             ready: BinaryHeap::new(),

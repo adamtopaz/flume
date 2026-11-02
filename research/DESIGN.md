@@ -34,6 +34,8 @@ the same PR as the code that changes the architecture.
  │         (Lean's grammar, checked)  │        │   header parser, later config   │
  │ keys:   Lake's trace rules, hashed │        │   evaluation and elaboration    │
  │ store:  .lake/flume/state.json     │        └────────────────────────────────┘
+ │ cache:  ~/.cache/flume, by key and │
+ │         content; shared by clones  │
  │ sched:  N workers, tallest first   │──spawn `lean` with Lake's exact arguments──▶
  └───────────────────────────────────┘
 ```
@@ -53,6 +55,14 @@ the same PR as the code that changes the architecture.
   `LEAN_PATH` set to the package's library directory and a setup file listing the
   same import artifacts Lake lists. Outputs go where Lake puts them
   (`.lake/build/lib/lean`, `.lake/build/ir`), so tools that read Lake's layout work.
+- **The shared cache** (`cache.rs`, roadmap P2) plays the part of Lake's artifact cache
+  for every checkout on the machine: `$FLUME_CACHE_DIR`, else `$XDG_CACHE_HOME/flume`,
+  else `~/.cache/flume` (`FLUME_CACHE=off` disables it). Artifacts are stored once by
+  content (`art/`), and each successful compile's outputs and messages are recorded
+  under the module's key (`key/<os>-<arch>/`). A module that is not up to date but whose
+  key is recorded gets its outputs hard-linked (or copied) into the build directory
+  instead of compiled, and its warnings replayed; `clone` and the repair after a
+  breaking edit cost links, not compiles. There is no size bound yet (P2's next step).
 
 ## The rules that keep flume correct
 
@@ -88,6 +98,13 @@ the same PR as the code that changes the architecture.
   normalized, as Lake's `Hash.ofText` does. Every output must exist; one whose status
   changed is rehashed and accepted only if its content matches what was built, which
   keeps copied checkouts cheap and catches deleted or replaced files.
+- **The cache is keyed like the state.** A cache entry is used only for the exact key a
+  compile would have been checked against, and the key contains no paths, so a restored
+  module's outputs are the ones Lake would accept for the same traces (Lake's own cache
+  makes the same inference). Cached files and restored outputs are read-only, as in
+  Lake, because they are hard links; files appear atomically (link or rename), so builds
+  in several checkouts may share the cache; an artifact that is missing or has the wrong
+  size makes the module compile, and that compile repairs the cache.
 - **One build per checkout at a time** (a lock in `.lake/flume/`), and a panic while
   processing a module fails that module only.
 
@@ -118,6 +135,8 @@ from the `✖` lines and compares them with Lake's.
 - `crates/flume/src/toolchain.rs`: finding the toolchain without starting `lean`.
 - `crates/flume/src/build.rs`: discovery, keys, setup files, scheduler, compilation.
 - `crates/flume/src/store.rs`: what is remembered between builds.
-- `worker/`: the Lean worker. `tests/`: checks that need a built toolchain.
+- `crates/flume/src/cache.rs`: the artifact cache shared by checkouts.
+- `worker/`: the Lean worker. `tests/`: checks that need a built toolchain
+  (`check_headers.py`, `check_cache.py`).
 - `bench/`: corpus generator, harness, configs. `research/`: this file, the roadmap,
   the log of every attempt, idea write-ups, and results.

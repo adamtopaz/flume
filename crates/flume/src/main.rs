@@ -9,8 +9,12 @@
 //! Options (before the command): `-d DIR`/`--dir DIR` runs in DIR; `-j N` sets the
 //! number of concurrent compilations (default: `LEAN_NUM_THREADS`, else the number of
 //! CPUs available); `-v` prints every message.
+//!
+//! Environment: `FLUME_CACHE_DIR` sets the artifact cache shared by checkouts (default
+//! `$XDG_CACHE_HOME/flume`, else `~/.cache/flume`); `FLUME_CACHE=off` disables it.
 
 mod build;
+mod cache;
 mod config;
 mod header;
 mod store;
