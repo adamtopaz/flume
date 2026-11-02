@@ -149,13 +149,12 @@ The candidate starts slow and converges on `main` (paired ratios 0.81 at the sta
 0.93-0.99 at the end); the work per build is identical (one compile, one store of three
 files, ~0.1 ms). On this corpus the tools' cold builds ran in the order candidate, lake,
 main, so the candidate's 1,000 `.olean` files (which the leaf, an ordinary file, imports
-transitively) were the oldest in the page cache, and Lake's first leaf build was just as
-slow. The machine was not quiet: it is a shared workstation (k3s, browsers, other coding
+transitively) were the oldest in the page cache, and Lake's first leaf build was slow too
+(1.27 s, then 0.65 s). The machine was not quiet: it is a shared workstation (k3s, browsers, other coding
 agents on the CPUs outside the cap) with 62 GB of RAM, 21 GB of swap in use and 15 GB
 free when the run ended, and a 15-minute load average of 25 at its end (the run itself
-accounts for up to 16). Evicted artifacts
-of the tool that built first are the most likely explanation; I found no mechanism by
-which the cache could slow a leaf build.
+accounts for up to 16). Evicted artifacts of the tool that built first are the most
+likely explanation; I found no mechanism by which the cache could slow a leaf build.
 
 I did not run a third time: it would take another 80 minutes past this iteration's time
 budget, with each run so far producing a false regression somewhere among its 31
