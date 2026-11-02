@@ -1,0 +1,11 @@
+# The flume worker: a small Lean program linked against the stock Lean toolchain
+# (pinned in ../lean-toolchain). Version 0 only exposes Lean's own header parser, as
+# the oracle for flume's Rust parser; the roadmap grows it into the process that
+# evaluates lakefile.lean configurations and, later, elaborates modules.
+name = "flume-worker"
+defaultTargets = ["flume-worker"]
+
+[[lean_exe]]
+name = "flume-worker"
+root = "FlumeWorker"
+supportInterpreter = true

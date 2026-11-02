@@ -1,0 +1,50 @@
+# Regenerates research/results/LEADERBOARD.md whenever results land on main, so nobody
+# commits it by hand (and PRs never conflict on it). A push made with GITHUB_TOKEN does
+# not trigger workflows, so this cannot loop.
+name: Leaderboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/results/**'
+      - 'bench/harness/leaderboard.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: leaderboard
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Regenerate
+        run: python3 bench/harness/leaderboard.py
+      - name: Commit if changed
+        run: |
+          git add research/results/LEADERBOARD.md
+          if git diff --cached --quiet; then
+            echo "leaderboard unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "leaderboard: regenerate from research/results"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            echo "push rejected (main moved); rebasing and retrying ($attempt)"
+            git pull --rebase origin main
+            python3 bench/harness/leaderboard.py
+            git add research/results/LEADERBOARD.md
+            git commit --amend --no-edit
+          done
+          exit 1

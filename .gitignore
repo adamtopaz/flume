@@ -1,0 +1,8 @@
+/target/
+.lake/
+/bench/work/
+/bench/local.json
+__pycache__/
+/result
+/result-*
+.direnv/
