@@ -213,8 +213,9 @@ def main() -> int:
         problems.append(f"PR title must start with one of {', '.join(k + ':' for k in KINDS)} (got {args.title!r})")
     if "lean-toolchain" in files and kind != "toolchain":
         problems.append("lean-toolchain changed; use a `toolchain:` PR if this is deliberate")
+    # Cargo build scripts live at a crate's root (next to its Cargo.toml)
     forbidden = sorted(p for p in files if p.startswith(FORBIDDEN_PREFIXES) or p in FORBIDDEN_FILES
-                       or p.endswith("/build.rs"))
+                       or re.fullmatch(r"crates/[^/]+/build\.rs", p))
     if forbidden:
         problems.append(f"build configuration outside Cargo.toml is not allowed ({', '.join(forbidden[:5])}): "
                         f"it could change how the measured binary is built")

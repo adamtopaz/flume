@@ -49,7 +49,8 @@ Prerequisites: `git`, `gh` (for the PR), and either Nix with flakes (recommended
 `nix develop` provides Rust, elan, Python, and the rest) or Rust 1.85+ (`rustup`),
 [`elan`](https://github.com/leanprover/elan), and Python 3.10+. Linux is the reference
 platform; CPU and memory caps are enforced only there (CPU affinity and `systemd-run
---user`). On macOS results are marked non-standard.
+--user`). On macOS results are marked non-standard, so a macOS contributor can submit
+`log:` PRs but not the standard results `research:` and `milestone:` PRs need.
 
 ```sh
 git clone https://github.com/adamtopaz/flume && cd flume
@@ -85,7 +86,8 @@ break check ok`.
    (`gh pr list --repo adamtopaz/flume`).
 2. Read `research/ideas/` (what worked) and `research/log/` (every attempt, including
    failures). Do not repeat a failed idea without a genuinely new angle, and say so.
-3. Read `research/results/LEADERBOARD.md` and `bench/README.md`.
+3. Read `bench/README.md`, and `research/results/LEADERBOARD.md` once results exist (a
+   workflow generates it after the first results are merged).
 4. **Profile before guessing.** `python3 bench/harness/run.py --suite quick --keep`
    leaves per-tool corpus copies under `bench/work/corpora/`; `flume -v build` prints
    every message; `perf` and `strace -c` work on flume and on `lean`.
@@ -117,7 +119,7 @@ break check ok`.
 All of these must pass before measuring:
 
 ```sh
-cargo build --release && cargo test --release && cargo clippy --release -- -D warnings
+cargo build --release && cargo test --release && cargo clippy --release -- -D warnings && cargo fmt --check
 python3 tests/check_headers.py
 python3 bench/harness/run.py --suite quick --tools lake,candidate
 ```
@@ -175,7 +177,9 @@ gh pr create --repo adamtopaz/flume --base main --head <you>:research/<slug> \
 
 Mark your draft ready for review. CI builds flume and the worker, runs the tests and the
 header check, and runs the quick suite for correctness; it never measures performance
-(your result file is the measurement). Fix red checks. The maintainer merges with merge
+(your result file is the measurement). The PR check judges your results against the code
+as it would be merged: if `main`'s code changed since you measured, merge `main` into
+your branch and measure again. Fix red checks. The maintainer merges with merge
 commits only, so every measured commit stays reachable.
 
 ## Hard rules, in one place

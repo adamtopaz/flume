@@ -69,13 +69,27 @@ the same PR as the code that changes the architecture.
 - **Setup files follow Lake's import walk** (`fetchTransImportArts`), including
   `import all` and `meta import` widening.
 - **Old outputs are removed before a module is compiled**, as Lake does, so a failed
-  compile never leaves stale artifacts.
+  compile never leaves stale artifacts. A compile fails when `lean` exits non-zero or
+  logs an error.
+- **Imports resolve as in Lake** (`Package.findModule?`: the last library whose globs or
+  roots make the module buildable); other imports are left to `lean`, which rejects an
+  unknown one. Library globs expand as Lake's do (symlinks followed; a missing base file
+  fails its compile; a missing directory fails that library's target only).
+- **Failures stay local, as in Lake.** A module whose header cannot be read or parsed, or
+  that lies on an import cycle, fails by itself and blocks only its dependents. Which
+  modules get built, the artifacts, and the exit status match Lake; the wording and the
+  number of `✖` lines for such header-level problems do not (Lake reports them as
+  separate jobs).
 - **Nothing is silently ignored.** A configuration option flume does not implement
   is an error, not a no-op.
 - **Up-to-date checks trust file status, then content.** An unchanged source (size,
-  mtime, ctime, inode) is not reread. An output whose status changed is rehashed and
-  accepted only if its content matches what was built, which keeps copied checkouts
-  cheap and catches replaced files.
+  mtime, ctime, inode) is not reread, unless it was modified within two seconds of being
+  read (timestamps that coarse cannot be trusted). Sources are hashed with line endings
+  normalized, as Lake's `Hash.ofText` does. Every output must exist; one whose status
+  changed is rehashed and accepted only if its content matches what was built, which
+  keeps copied checkouts cheap and catches deleted or replaced files.
+- **One build per checkout at a time** (a lock in `.lake/flume/`), and a panic while
+  processing a module fails that module only.
 
 ## Output and exit status
 

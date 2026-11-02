@@ -22,8 +22,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check the PR against the research-loop rules
+      # The rules a PR is judged by are the base branch's, so a PR cannot relax them.
+      - name: Check the PR against the base branch's research-loop rules
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.base_ref }}
-        run: python3 ci/pr_check.py --base "origin/$BASE_REF" --title "$PR_TITLE"
+        run: |
+          if git show "origin/$BASE_REF:ci/pr_check.py" > ci/.pr_check_base.py 2>/dev/null; then
+            python3 ci/.pr_check_base.py --base "origin/$BASE_REF" --title "$PR_TITLE"
+          else
+            python3 ci/pr_check.py --base "origin/$BASE_REF" --title "$PR_TITLE"
+          fi

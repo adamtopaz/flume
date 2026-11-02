@@ -3,7 +3,7 @@
 
 Usage: python3 tests/check_headers.py [PATH...]
 Every .lean file under each PATH (default: the stock toolchain's Lean sources, about
-5,000 real headers) is parsed by both; any difference in module flag, imports, or
+2,500 real headers) is parsed by both; any difference in module flag, imports, or
 whether parsing failed is reported. Exit status 1 on any difference.
 Build both first: `cargo build --release` and `(cd worker && lake build)`.
 """

@@ -67,7 +67,7 @@ configure them; remote cache downloads are off (`LAKE_NO_CACHE=1`).
 | | `swarm` | edit up to 24 little-imported modules at once, mixed kinds |
 | many checkouts | `clone` | a fresh checkout of the current sources while the tool's cache holds everything |
 | | `agents-4`, `agents-16` | 4 or 16 built checkouts each edit their own module and build at once; time until all finish |
-| (untimed) | `break` | two breaking edits to the hub must fail with as many failed jobs as Lake, then recover |
+| (untimed) | `break` | two breaking edits to the hub must fail with as many failed jobs as Lake, then recover; then some of the hub's and the leaf's artifacts are deleted and must be rebuilt exactly |
 
 Edit kinds (`harness/edits.py`): `proof` and `private` keep a module's interface;
 `public`, `statement`, and `body` change it (still building); every edit is unique and
@@ -84,9 +84,11 @@ of the candidate with repetition *i* of `main`.
 The harness pins itself and every child to `--cpus` (Linux) and sets
 `LEAN_NUM_THREADS` to their count; `--mem-gb` is enforced with a transient `systemd-run
 --user --scope` per build (or per group of agent builds), which also accounts for the
-whole process tree and finds stragglers. An unenforced CPU cap makes a run
-non-standard. The environment is scrubbed of `LAKE_*`, `LEAN_*`, `ELAN_TOOLCHAIN`, and
-cache variables; each tool gets private cache and temp directories.
+whole process tree and finds stragglers (processes still in the scope's cgroup after the
+command returns). An unenforced CPU cap makes a run non-standard. The environment is
+scrubbed of `LAKE_*`, `LEAN_*`, `ELAN_TOOLCHAIN`, and cache variables, the harness's own
+variables are removed before the tool starts, and each tool gets private cache and temp
+directories. A tree with uncommitted changes or untracked files is not standard.
 
 ## Correctness
 
@@ -94,9 +96,11 @@ After **every** build the harness hashes every artifact of every module (`.olean
 `.ilean`, `.c`, and for module-system corpora `.olean.server`, `.olean.private`, `.ir`,
 `.ir.sig`) and compares them with stock Lake's at the same step. Artifacts are read
 from `.lake/build`; one that is not there is located with the tool's `query` command.
-It also requires every build to succeed, no processes to be left behind, and both
-breaking edits to fail with the same number of failed jobs as Lake. Any difference marks
-the candidate incorrect.
+It also requires every build to succeed, no processes to be left behind, both breaking
+edits to fail with the same number of failed jobs as Lake, and deleted artifacts to be
+rebuilt. Any difference marks the candidate incorrect. Scenarios where a tool rebuilt a
+different number of modules than Lake are reported as notes (fewer needs a proof that the
+skipped outputs are identical; see `../research/DESIGN.md`).
 
 ## Build servers
 
