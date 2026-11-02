@@ -11,7 +11,8 @@
 //! CPUs available); `-v` prints every message.
 //!
 //! Environment: `FLUME_CACHE_DIR` sets the artifact cache shared by checkouts (default
-//! `$XDG_CACHE_HOME/flume`, else `~/.cache/flume`); `FLUME_CACHE=off` disables it.
+//! `$XDG_CACHE_HOME/flume`, else `~/.cache/flume`); `FLUME_CACHE=off` disables it;
+//! `FLUME_ZYGOTE=off` runs `lean` for every compile instead of the fork server.
 
 mod build;
 mod cache;
@@ -19,6 +20,7 @@ mod config;
 mod header;
 mod store;
 mod toolchain;
+mod zygote;
 
 use std::path::PathBuf;
 

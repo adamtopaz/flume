@@ -36,7 +36,8 @@ the same PR as the code that changes the architecture.
  │ store:  .lake/flume/state.json     │        └────────────────────────────────┘
  │ cache:  ~/.cache/flume, by key and │
  │         content; shared by clones  │
- │ sched:  N workers, tallest first   │──spawn `lean` with Lake's exact arguments──▶
+ │ sched:  N workers, tallest first   │──`lean`'s driver, Lake's exact arguments,──▶
+ │         (zygote: forked children)  │  in forked children of one initialized Lean
  └───────────────────────────────────┘
 ```
 
@@ -55,6 +56,16 @@ the same PR as the code that changes the architecture.
   `LEAN_PATH` set to the package's library directory and a setup file listing the
   same import artifacts Lake lists. Outputs go where Lake puts them
   (`.lake/build/lib/lean`, `.lake/build/ir`), so tools that read Lake's layout work.
+- **The zygote** (`zygote.rs`, `zygote.c`, roadmap P1) saves `lean`'s start-up (~20 ms of
+  `exec`, dynamic linking, and initialization) per compile: a small C program linked
+  against the toolchain's `libleanshared` initializes Lean once, as `lean` does, and forks
+  a child per compile that runs the rest of `lean_main` (v4.35.0 `src/util/shell.cpp`:
+  search path, stack size, option parsing, task manager, `lean_shell_main` on a thread
+  with `lean`'s stack size) on the same arguments. flume compiles it with `cc` on first use
+  into the cache, starts it at a build's first compile, sends compiles to it once it is
+  ready, and kills it at the end of the build. Without a C compiler, for another Lean
+  release, for library arguments other than `-D` options, or with `FLUME_ZYGOTE=off`,
+  compiles run `lean` directly.
 - **The shared cache** (`cache.rs`, roadmap P2) plays the part of Lake's artifact cache
   for every checkout on the machine: `$FLUME_CACHE_DIR`, else `$XDG_CACHE_HOME/flume`,
   else `~/.cache/flume` (`FLUME_CACHE=off` disables it). Artifacts are stored once by
@@ -136,7 +147,8 @@ from the `✖` lines and compares them with Lake's.
 - `crates/flume/src/build.rs`: discovery, keys, setup files, scheduler, compilation.
 - `crates/flume/src/store.rs`: what is remembered between builds.
 - `crates/flume/src/cache.rs`: the artifact cache shared by checkouts.
+- `crates/flume/src/zygote.rs`, `zygote.c`: the fork server that compiles modules.
 - `worker/`: the Lean worker. `tests/`: checks that need a built toolchain
-  (`check_headers.py`, `check_cache.py`).
+  (`check_headers.py`, `check_cache.py`, `check_zygote.py`).
 - `bench/`: corpus generator, harness, configs. `research/`: this file, the roadmap,
   the log of every attempt, idea write-ups, and results.

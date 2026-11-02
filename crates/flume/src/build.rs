@@ -23,7 +23,9 @@
 //!    <olean> -i <ilean> -c <c> --setup <setup.json> --json` with `LEAN_PATH` set to the
 //!    package's library directory, after removing the module's old outputs; the setup
 //!    file lists the import artifacts Lake would list (its `fetchTransImportArts` walk).
-//!    A compile fails if `lean` exits non-zero or logs an error.
+//!    A compile fails if `lean` exits non-zero or logs an error. Compiles run in forked
+//!    children of one pre-initialized Lean process when it is available (`zygote.rs`),
+//!    which run `lean`'s own driver on the same arguments.
 //! 4. **The shared cache** (`cache.rs`). A successful compile's outputs are stored by
 //!    content and recorded under the module's key; a module that is not up to date but
 //!    whose key is in the cache gets those outputs linked into place instead of being
@@ -37,8 +39,10 @@ use crate::config::{Glob, Lib, Package};
 use crate::header;
 use crate::store::{BuildLock, Built, FileStat, SourceInfo, State, StoredImport};
 use crate::toolchain::Toolchain;
+use crate::zygote::Zygote;
 use serde_json::{json, Map, Value as Json};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -571,6 +575,7 @@ struct Shared<'a> {
     g: &'a Graph,
     state: &'a State,
     cache: Option<&'a Cache>,
+    zygote: &'a Zygote,
     verbose: bool,
     sched: Mutex<Sched>,
     cv: Condvar,
@@ -798,14 +803,16 @@ impl Shared<'_> {
         Some((outputs, stats, entry.messages))
     }
 
-    /// Compile a module: `Ok((outputs, stats, messages, ms))` or `Err((messages, error))`.
-    /// A successful compile is stored in the cache under `key`.
+    /// Compile a module: `Ok((outputs, stats, messages, ms, forked))` (`forked`: in a
+    /// child of the zygote) or `Err((messages, error))`. A successful compile is stored in
+    /// the cache under `key`.
     #[allow(clippy::type_complexity)]
     fn compile(
         &self,
         i: usize,
         key: &str,
-    ) -> Result<(Outputs, Vec<(String, FileStat)>, Vec<String>, u128), (Vec<String>, String)> {
+    ) -> Result<(Outputs, Vec<(String, FileStat)>, Vec<String>, u128, bool), (Vec<String>, String)>
+    {
         let m = &self.g.mods[i];
         let lib = &self.pkg.libs[m.lib];
         let olean = artifact_path(self.pkg, &m.comps, "olean");
@@ -824,35 +831,67 @@ impl Shared<'_> {
         ) {
             return Err((vec![], format!("cannot write {}: {e}", setup.display())));
         }
-        let mut cmd = Command::new(&self.tc.lean);
-        cmd.args(&lib.weak_args)
-            .args(&lib.more_args)
-            .arg(&m.file)
-            .arg("-o")
-            .arg(&olean)
-            .arg("-i")
-            .arg(&ilean)
-            .arg("-c")
-            .arg(&c)
-            .arg("--setup")
-            .arg(&setup)
-            .arg("--json")
-            .env("LEAN_PATH", &self.pkg.lib_dir)
-            .current_dir(&self.pkg.root)
-            .stdin(Stdio::null());
+        let mut args: Vec<OsString> = Vec::new();
+        args.extend(lib.weak_args.iter().map(OsString::from));
+        args.extend(lib.more_args.iter().map(OsString::from));
+        for a in [
+            m.file.as_os_str(),
+            "-o".as_ref(),
+            olean.as_os_str(),
+            "-i".as_ref(),
+        ] {
+            args.push(a.to_os_string());
+        }
+        for a in [
+            ilean.as_os_str(),
+            "-c".as_ref(),
+            c.as_os_str(),
+            "--setup".as_ref(),
+        ] {
+            args.push(a.to_os_string());
+        }
+        args.push(setup.clone().into_os_string());
+        args.push("--json".into());
         let t0 = Instant::now();
-        let out = cmd.output().map_err(|e| {
-            (
-                vec![],
-                format!("cannot run {}: {e}", self.tc.lean.display()),
-            )
-        })?;
+        // The zygote mirrors `lean`'s start-up for Lean options (`-D`); anything else
+        // (`--tstack`, `--profile`, ...) runs `lean` itself.
+        let zygote_ok = lib
+            .weak_args
+            .iter()
+            .chain(&lib.more_args)
+            .all(|a| a.starts_with("-D"));
+        let via_zygote = if zygote_ok {
+            self.zygote.run(&self.tc.lean, &args)
+        } else {
+            None
+        };
+        let forked = via_zygote.is_some();
+        let (success, stdout, stderr) = match via_zygote {
+            Some((code, stdout, stderr)) => (code == 0, stdout, stderr),
+            None => {
+                // the zygote did not take it (or died running it): run `lean` itself
+                self.clear_outputs(m);
+                let out = Command::new(&self.tc.lean)
+                    .args(&args)
+                    .env("LEAN_PATH", &self.pkg.lib_dir)
+                    .current_dir(&self.pkg.root)
+                    .stdin(Stdio::null())
+                    .output()
+                    .map_err(|e| {
+                        (
+                            vec![],
+                            format!("cannot run {}: {e}", self.tc.lean.display()),
+                        )
+                    })?;
+                (out.status.success(), out.stdout, out.stderr)
+            }
+        };
         let ms = t0.elapsed().as_millis();
         let mut msgs = Vec::new();
         let mut logged_error = false;
-        for line in String::from_utf8_lossy(&out.stdout)
+        for line in String::from_utf8_lossy(&stdout)
             .lines()
-            .chain(String::from_utf8_lossy(&out.stderr).lines())
+            .chain(String::from_utf8_lossy(&stderr).lines())
         {
             if line.trim().is_empty() {
                 continue;
@@ -861,7 +900,7 @@ impl Shared<'_> {
             logged_error |= is_error;
             msgs.push(text);
         }
-        if !out.status.success() || logged_error {
+        if !success || logged_error {
             return Err((msgs, String::new()));
         }
         let mut outputs = Vec::new();
@@ -887,7 +926,7 @@ impl Shared<'_> {
         let stats = self
             .output_stats(m)
             .map_err(|e| (msgs.clone(), format!("missing output of {}: {e}", m.name)))?;
-        Ok((outputs, stats, msgs, ms))
+        Ok((outputs, stats, msgs, ms, forked))
     }
 
     fn print(&self, text: &str) {
@@ -955,13 +994,18 @@ impl Shared<'_> {
             return (Status::Restored, outputs, Some(Some(b)));
         }
         match self.compile(i, &key) {
-            Ok((outputs, stats, msgs, ms)) => {
+            Ok((outputs, stats, msgs, ms, forked)) => {
                 let n = self.next_count();
                 let warn = msgs.iter().any(|l| l.starts_with("warning:"));
                 let mut text = format!(
-                    "{} [{n}/{total}] Built {} ({ms}ms)\n",
+                    "{} [{n}/{total}] Built {} ({ms}ms){}\n",
                     if warn { "⚠" } else { "✔" },
-                    m.name
+                    m.name,
+                    if forked && self.verbose {
+                        " [zygote]"
+                    } else {
+                        ""
+                    }
                 );
                 if warn || self.verbose {
                     for l in &msgs {
@@ -1095,12 +1139,23 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
     let g = discover(pkg, &state, roots, &mut sources);
     let n = g.mods.len();
     let cache = Cache::from_env();
+    let zygote = Zygote::new(
+        &tc.lean,
+        &tc.version,
+        &pkg.root,
+        &pkg.lib_dir,
+        match &cache {
+            Some(c) => c.dir("zygote"),
+            None => flume_dir.join("zygote-bin"),
+        },
+    );
     let shared = Shared {
         pkg,
         tc,
         g: &g,
         state: &state,
         cache: cache.as_ref(),
+        zygote: &zygote,
         verbose: opts.verbose,
         sched: Mutex::new(Sched {
             ready: BinaryHeap::new(),
@@ -1128,6 +1183,7 @@ pub fn build(pkg: &Package, tc: &Toolchain, opts: &Options) -> Result<bool, Stri
             sc.spawn(|| shared.worker());
         }
     });
+    zygote.finish();
     let s = shared.sched.into_inner().unwrap_or_else(|e| e.into_inner());
     for e in &target_errors {
         println!("✖ Collecting modules\nerror: {e}");
