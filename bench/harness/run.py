@@ -579,15 +579,27 @@ class ToolState:
                 "bash", str(SCOPE_STATS), *cmd]
 
     def reap(self, unit: str) -> int:
-        """Kill anything a scope left behind; return how many processes there were."""
+        """Kill anything a scope left behind; return how many processes there were.
+
+        systemd notices that a scope's cgroup emptied asynchronously, so a scope whose
+        command exits within milliseconds can still read `active` for a moment; only
+        processes that remain in it for a second count as stragglers."""
         if not self.use_scope:
             return 0
-        show = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState", "-p", "NPids", f"{unit}.scope"],
-                              capture_output=True, text=True)
-        props = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
         n = 0
-        if props.get("ActiveState") == "active":
-            n = max(1, int(props.get("NPids", "1") or 1))
+        deadline = time.monotonic() + 1.0
+        while True:
+            show = subprocess.run(["systemctl", "--user", "show", "-p", "ActiveState", "-p", "NPids", f"{unit}.scope"],
+                                  capture_output=True, text=True)
+            props = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+            if props.get("ActiveState") not in ("active", "deactivating"):
+                n = 0
+                break
+            n = int(props.get("NPids", "0") or 0)
+            if n == 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        if props.get("ActiveState") in ("active", "deactivating"):
             subprocess.run(["systemctl", "--user", "stop", f"{unit}.scope"], capture_output=True)
         self.stragglers += n
         return n
