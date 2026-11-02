@@ -171,6 +171,11 @@ def main() -> int:
     ap.add_argument("--title", required=True, help="the PR title")
     args = ap.parse_args()
 
+    if show(args.base, "ci/pr_check.py") is None:
+        # The rules come from the base branch; a base without them (the founding PR) has
+        # nothing to check against.
+        print(f"{args.base} has no research-loop rules yet (ci/pr_check.py); nothing to check")
+        return 0
     files = changed_files(args.base)
     m = re.match(r"\s*([A-Za-z]+):", args.title)
     kind = m.group(1).lower() if m else ""
