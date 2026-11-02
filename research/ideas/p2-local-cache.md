@@ -2,8 +2,8 @@
 
 - **Merged:** (filled in by the maintainer on merge)
 - **Milestone:** P2 (step 1)
-- **Log entry:** ../log/2026-11-02-p2-local-cache.md
-- **Scenarios improved:** clone (MEASUREMENTS)
+- **Log entry:** ../log/2026-11-02-p2-local-cache.md (built, measured `failure` on noise twice) and ../log/2026-11-02-p2-local-cache-2.md (re-measured, `success`)
+- **Scenarios improved:** clone (233-321x faster than `main`, 1.5x faster than Lake)
 
 ## Problem
 
@@ -43,7 +43,19 @@ every scenario, and after the repair step, which now restores from the cache.
 
 ## Measured gains
 
-MEASUREMENTS
+`research/results/20261102T225020Z-2e698309-15f5b59.json` (standard suite, `--targets
+clone,agents-4 --repeat 5 --repeat-fast 20`, 16 CPUs):
+
+```
+speedup of candidate vs main: cold=1.002x, noop=0.983x, leaf=0.990x, newfile=1.023x, hub-private=1.000x, hub-interface=0.995x, swarm=1.005x, clone=268.884x, agents-4=1.016x, workflow:single=0.999x, workflow:many=16.528x, workflow:cold=1.002x, overall=2.549x
+speedup of candidate vs lake: cold=1.036x, noop=3.696x, leaf=1.392x, newfile=2.026x, hub-private=1.433x, hub-interface=1.042x, swarm=1.205x, clone=1.517x, agents-4=1.422x, workflow:single=1.630x, workflow:many=1.469x, workflow:cold=1.036x, overall=1.354x
+verdict: success [targets: clone, agents-4]
+```
+
+`clone` medians: 44.61 s to 0.19 s (deep), 48.33 s to 0.18 s (layered), 45.92 s to 0.14 s
+(wide); Lake takes 0.25-0.27 s. The repair step after deleted artifacts went from 2 jobs to
+0, as in Lake. Two earlier standard runs of the same code said `failure`, each on a
+different scenario that never regressed again (see the log entries).
 
 ## Caveats
 
