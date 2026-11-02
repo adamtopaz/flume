@@ -15,43 +15,45 @@ comparable only through these ratios.
 
 | date (UTC) | machine | cpus | suite | branch | commit | label | verdict | vs main | vs lake | vs blake | correct | standard | duration | file |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-02 21:21 | 2e698309 | 16 | standard | research/p2-local-cache | 2ceaf64 | p2-local-cache-rerun | failure (clone,agents-4) | 2.606x | 1.423x | - | yes | yes | 77 min | `20261102T212100Z-2e698309-2ceaf64.json` |
+| 2026-11-02 20:01 | 2e698309 | 16 | standard | research/p2-local-cache | 976e41c | p2-local-cache | failure (clone,agents-4) | 2.524x | 1.358x | - | yes | yes | 48 min | `20261102T200145Z-2e698309-976e41c.json` |
 | 2026-11-02 18:38 | 2e698309 | 16 | standard | main | 15a7f62 | baseline | neutral | 1.000x | 0.539x | - | yes | yes | 32 min | `20261102T183814Z-2e698309-15a7f62.json` |
 
 ## Per-scenario detail of the newest standard run per machine
 
-### 2e698309: Intel(R) Core(TM) i9-14900K (16 cpus, 32 GB cap), 2026-11-02, suite standard, commit 15a7f62
+### 2e698309: Intel(R) Core(TM) i9-14900K (16 cpus, 32 GB cap), 2026-11-02, suite standard, commit 2ceaf64
 
 | corpus | scenario | lake | main | candidate |
 |---|---|---|---|---|
-| medium-deep | cold | 40.26 s | 37.03 s | 37.03 s |
-| medium-deep | noop | 0.17 s | 0.04 s | 0.04 s |
-| medium-deep | leaf | 0.46 s | 0.38 s | 0.38 s |
-| medium-deep | newfile | 0.27 s | 0.17 s | 0.17 s |
-| medium-deep | hub-private | 0.48 s | 0.34 s | 0.34 s |
-| medium-deep | hub-interface | 38.03 s | 35.77 s | 35.77 s |
-| medium-deep | swarm | 1.92 s | 1.66 s | 1.66 s |
-| medium-deep | clone | 0.37 s | 38.20 s | 38.20 s |
-| medium-deep | agents-4 | 1.13 s | 1.04 s | 1.04 s |
-| medium-layered | cold | 44.17 s | 42.20 s | 42.20 s |
-| medium-layered | noop | 0.17 s | 0.04 s | 0.04 s |
-| medium-layered | leaf | 0.56 s | 0.41 s | 0.41 s |
-| medium-layered | newfile | 0.25 s | 0.18 s | 0.18 s |
-| medium-layered | hub-private | 0.36 s | 0.25 s | 0.25 s |
-| medium-layered | hub-interface | 41.52 s | 39.18 s | 39.18 s |
-| medium-layered | swarm | 2.17 s | 1.88 s | 1.88 s |
-| medium-layered | clone | 0.27 s | 43.14 s | 43.14 s |
-| medium-layered | agents-4 | 0.43 s | 0.32 s | 0.32 s |
-| medium-legacy | cold | 46.21 s | 43.33 s | 43.33 s |
-| medium-legacy | noop | 0.20 s | 0.05 s | 0.05 s |
-| medium-legacy | leaf | 0.56 s | 0.42 s | 0.42 s |
-| medium-legacy | hub-interface | 40.53 s | 38.85 s | 38.85 s |
-| medium-wide | cold | 42.03 s | 40.00 s | 40.00 s |
-| medium-wide | noop | 0.18 s | 0.05 s | 0.05 s |
-| medium-wide | leaf | 0.48 s | 0.37 s | 0.37 s |
-| medium-wide | newfile | 0.27 s | 0.15 s | 0.15 s |
-| medium-wide | hub-private | 0.46 s | 0.30 s | 0.30 s |
-| medium-wide | hub-interface | 40.57 s | 38.90 s | 38.90 s |
-| medium-wide | swarm | 1.37 s | 1.16 s | 1.16 s |
-| medium-wide | clone | 0.26 s | 38.72 s | 38.72 s |
-| medium-wide | agents-4 | 0.73 s | 0.64 s | 0.64 s |
+| medium-deep | cold | 48.66 s | 48.06 s | 47.56 s |
+| medium-deep | noop | 0.15 s | 0.04 s | 0.04 s |
+| medium-deep | leaf | 0.55 s | 0.38 s | 0.37 s |
+| medium-deep | newfile | 0.36 s | 0.17 s | 0.17 s |
+| medium-deep | hub-private | 0.49 s | 0.35 s | 0.34 s |
+| medium-deep | hub-interface | 47.86 s | 43.35 s | 43.68 s |
+| medium-deep | swarm | 2.59 s | 2.15 s | 2.14 s |
+| medium-deep | clone | 0.28 s | 45.12 s | 0.15 s |
+| medium-deep | agents-4 | 1.44 s | 1.09 s | 1.08 s |
+| medium-layered | cold | 51.00 s | 50.56 s | 49.68 s |
+| medium-layered | noop | 0.16 s | 0.04 s | 0.04 s |
+| medium-layered | leaf | 0.57 s | 0.43 s | 0.43 s |
+| medium-layered | newfile | 0.36 s | 0.18 s | 0.19 s |
+| medium-layered | hub-private | 0.36 s | 0.26 s | 0.26 s |
+| medium-layered | hub-interface | 45.81 s | 43.24 s | 44.45 s |
+| medium-layered | swarm | 2.77 s | 2.28 s | 2.26 s |
+| medium-layered | clone | 0.30 s | 46.86 s | 0.16 s |
+| medium-layered | agents-4 | 0.63 s | 0.34 s | 0.34 s |
+| medium-legacy | cold | 49.53 s | 47.92 s | 48.06 s |
+| medium-legacy | noop | 0.18 s | 0.05 s | 0.04 s |
+| medium-legacy | leaf | 0.67 s | 0.45 s | 0.49 s |
+| medium-legacy | hub-interface | 45.28 s | 42.78 s | 42.43 s |
+| medium-wide | cold | 45.89 s | 42.94 s | 43.17 s |
+| medium-wide | noop | 0.15 s | 0.04 s | 0.04 s |
+| medium-wide | leaf | 0.45 s | 0.37 s | 0.37 s |
+| medium-wide | newfile | 0.25 s | 0.14 s | 0.13 s |
+| medium-wide | hub-private | 0.45 s | 0.32 s | 0.31 s |
+| medium-wide | hub-interface | 45.11 s | 42.48 s | 43.11 s |
+| medium-wide | swarm | 1.66 s | 1.32 s | 1.31 s |
+| medium-wide | clone | 0.27 s | 44.24 s | 0.14 s |
+| medium-wide | agents-4 | 0.93 s | 0.70 s | 0.69 s |
 
