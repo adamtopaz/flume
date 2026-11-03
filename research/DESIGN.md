@@ -29,12 +29,12 @@ the same PR as the code that changes the architecture.
             flume (Rust)                                stock Lean toolchain
  ┌───────────────────────────────────┐        ┌────────────────────────────────┐
  │ config: lakefile.toml              │        │ lean      compiles one module  │
- │         lakefile.lean ──────────────┼─TOML──▶│ lake translate-config (Lake's  │
- │                                    │        │   own loader); flume-worker    │
- │ graph:  headers parsed in Rust     │        │   and Lake as libraries): Lean's│
- │         (Lean's grammar, checked)  │        │   header parser, later config   │
- │ keys:   Lake's trace rules, hashed │        │   evaluation and elaboration    │
- │ store:  .lake/flume/state.json     │        └────────────────────────────────┘
+ │         lakefile.lean ──────────────┼─TOML──▶│ lake translate-config: Lake's  │
+ │ graph:  headers parsed in Rust     │        │   own loader for lakefile.lean │
+ │         (Lean's grammar, checked)  │        │ flume-worker (Lean, links Lean │
+ │ keys:   Lake's trace rules, hashed │        │   and Lake): header parser,    │
+ │ store:  .lake/flume/state.json     │        │   later elaboration            │
+ │                                    │        └────────────────────────────────┘
  │ cache:  ~/.cache/flume, by key and │
  │         content; shared by clones  │
  │ sched:  N workers, tallest first   │──`lean`'s driver, Lake's exact arguments,──▶
