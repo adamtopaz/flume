@@ -18,6 +18,7 @@ mod build;
 mod cache;
 mod config;
 mod header;
+mod lean_config;
 mod store;
 mod toolchain;
 mod zygote;

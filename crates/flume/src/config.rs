@@ -1,4 +1,5 @@
-//! Reading a package's `lakefile.toml`.
+//! Reading a package's configuration: `lakefile.toml`, or `lakefile.lean` through Lake's
+//! own loader (`lean_config.rs`), which wins when both exist, as in Lake.
 //!
 //! Version 0 supports the subset the benchmark corpora and simple projects use: the
 //! package `name`, `defaultTargets`, `srcDir`, `buildDir`, `leanLibDir`, `irDir`,
@@ -6,8 +7,8 @@
 //! `name`, `srcDir`, `roots`, `globs`, `leanOptions`, `moreLeanArgs`, `weakLeanArgs`,
 //! `defaultFacets = ["leanArts"]`. Keys that cannot change a library's Lean artifacts
 //! (metadata, linking, server, cache options) are accepted. Every other key is an error,
-//! never silently ignored: dependencies, `lean_exe` targets, `lakefile.lean`, a non-release
-//! `buildType`, `bootstrap`, plugins, precompilation, and anything unknown.
+//! never silently ignored: dependencies, `lean_exe` targets, a non-release `buildType`,
+//! `bootstrap`, plugins, precompilation, and anything unknown.
 
 use serde_json::{Map, Value as Json};
 use std::path::{Path, PathBuf};
@@ -302,22 +303,28 @@ fn check_keys(t: &toml::Table, known: &[&str], inert: &[&str], what: &str) -> Re
 }
 
 pub fn load(root: &Path) -> Result<Package, String> {
+    // Lake's choice (`Load/Package.lean`): `lakefile.lean` if it exists, else the TOML file
+    let lean_path = root.join("lakefile.lean");
     let toml_path = root.join("lakefile.toml");
-    if !toml_path.is_file() {
-        if root.join("lakefile.lean").is_file() {
-            return Err(
-                "this project is configured in lakefile.lean, which flume does not read yet \
-                        (roadmap milestone C2); only lakefile.toml is supported"
-                    .into(),
-            );
-        }
-        return Err(format!("no lakefile.toml in {}", root.display()));
-    }
-    let text = std::fs::read_to_string(&toml_path)
-        .map_err(|e| format!("cannot read {}: {e}", toml_path.display()))?;
+    let (text, origin) = if lean_path.is_file() {
+        let tc = crate::toolchain::detect(root)?;
+        (
+            crate::lean_config::translate(root, &lean_path, &tc)?,
+            lean_path,
+        )
+    } else if toml_path.is_file() {
+        let text = std::fs::read_to_string(&toml_path)
+            .map_err(|e| format!("cannot read {}: {e}", toml_path.display()))?;
+        (text, toml_path)
+    } else {
+        return Err(format!(
+            "no lakefile.lean or lakefile.toml in {}",
+            root.display()
+        ));
+    };
     let t: toml::Table = text
         .parse()
-        .map_err(|e| format!("{}: {e}", toml_path.display()))?;
+        .map_err(|e| format!("{} (as TOML): {e}", origin.display()))?;
     check_keys(&t, PKG_KEYS, PKG_INERT, "package")?;
     let name = t
         .get("name")

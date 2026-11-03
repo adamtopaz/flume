@@ -28,8 +28,9 @@ the same PR as the code that changes the architecture.
 ```
             flume (Rust)                                stock Lean toolchain
  ┌───────────────────────────────────┐        ┌────────────────────────────────┐
- │ config: lakefile.toml  (v0)        │        │ lean      compiles one module  │
- │         lakefile.lean ──────────────┼─JSON──▶│ flume-worker (Lean, links Lean │
+ │ config: lakefile.toml              │        │ lean      compiles one module  │
+ │         lakefile.lean ──────────────┼─TOML──▶│ lake translate-config (Lake's  │
+ │                                    │        │   own loader); flume-worker    │
  │ graph:  headers parsed in Rust     │        │   and Lake as libraries): Lean's│
  │         (Lean's grammar, checked)  │        │   header parser, later config   │
  │ keys:   Lake's trace rules, hashed │        │   evaluation and elaboration    │
@@ -41,6 +42,13 @@ the same PR as the code that changes the architecture.
  └───────────────────────────────────┘
 ```
 
+- **Configuration.** `lakefile.toml` is read directly. A `lakefile.lean` (which Lake
+  prefers when both exist) is a Lean program, so flume has Lake evaluate it: the
+  toolchain's `lake translate-config toml` loads the root package with Lake's own loader
+  and writes the evaluated declarative configuration as TOML, which flume caches in
+  `.lake/flume/config/` by the file's content, its local imports, and the toolchain
+  (`lean_config.rs`). Declarations the translation would drop (`target`, `script`,
+  `extern_lib`, facets, `post_update`) make flume refuse the configuration.
 - **The driver** (`crates/flume`, Rust) owns everything that does not need Lean's
   semantics: reading configurations, parsing headers, the module graph, deciding
   what is up to date, scheduling, and running compilations. It starts in about a
@@ -142,6 +150,7 @@ from the `✖` lines and compares them with Lake's.
 
 - `crates/flume/src/main.rs`: command line (`build`, `query`, `clean`, `debug-headers`).
 - `crates/flume/src/config.rs`: `lakefile.toml`, libraries, globs.
+- `crates/flume/src/lean_config.rs`: `lakefile.lean` through `lake translate-config`.
 - `crates/flume/src/header.rs`: Lean's header grammar (port of `ParseImportsFast.lean`).
 - `crates/flume/src/toolchain.rs`: finding the toolchain without starting `lean`.
 - `crates/flume/src/build.rs`: discovery, keys, setup files, scheduler, compilation.
@@ -149,6 +158,6 @@ from the `✖` lines and compares them with Lake's.
 - `crates/flume/src/cache.rs`: the artifact cache shared by checkouts.
 - `crates/flume/src/zygote.rs`, `zygote.c`: the fork server that compiles modules.
 - `worker/`: the Lean worker. `tests/`: checks that need a built toolchain
-  (`check_headers.py`, `check_cache.py`, `check_zygote.py`).
+  (`check_headers.py`, `check_cache.py`, `check_zygote.py`, `check_lakefile_lean.py`).
 - `bench/`: corpus generator, harness, configs. `research/`: this file, the roadmap,
   the log of every attempt, idea write-ups, and results.
