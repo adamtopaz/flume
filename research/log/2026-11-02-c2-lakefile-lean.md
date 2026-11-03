@@ -40,6 +40,37 @@ need executables, dependencies, native code, or scripts, so none qualifies as
 
 ## What was done
 
+- `crates/flume/src/lean_config.rs` (new): `translate` runs the toolchain's
+  `lake translate-config toml <tmp>` in the package root (Lake refuses to overwrite, so
+  the output goes to a fresh name), and caches the TOML in
+  `.lake/flume/config/<key>.toml`, keeping only the newest. The key hashes a version tag,
+  the toolchain's githash, `lakefile.lean` with line endings normalized, and every local
+  file it imports (its header parsed with flume's own parser; `Lake`, `Lean`, `Init`, and
+  `Std` imports are the toolchain's). Before that, `discarded_command` scans the file,
+  with comments (`--`, nested `/- -/`) and strings (`"..."`, `r#"..."#`) blanked out, for a
+  line whose first word after attributes is `target`, `script`, `extern_lib`,
+  `module_facet`, `library_facet`, `package_facet`, or `post_update` followed by a name
+  (so `target := 1` or `target.foo` in a definition do not count); flume then refuses the
+  configuration and names the construct. Unit tests cover the scanner.
+- `crates/flume/src/config.rs`: `load` picks `lakefile.lean` over `lakefile.toml` (Lake's
+  order) and parses either text with the same TOML reader, so every rule for unsupported
+  keys (dependencies, executables, unknown options) applies to Lean configurations too.
+- `tests/check_lakefile_lean.py` (new): the four small benchmark corpora rewritten as
+  `lakefile.lean` (by `lake translate-config lean`) and a hand-written configuration (two
+  libraries, `srcDir`, package and library `leanOptions`, `moreLeanArgs`, `weakLeanArgs`
+  computed by a helper `def` and `s!`, a library inside `meta if`), each built by stock
+  Lake and by flume; then caching, an edit, precedence over `lakefile.toml`, and refusals
+  of `script`, `target`, and `require`.
+- `research/DESIGN.md`: the configuration path, the diagram, and the file list.
+
+Checks: `cargo build/test/clippy/fmt` clean (16 unit tests); `tests/check_lakefile_lean.py`:
+identical artifacts for small-deep (1,400 files), small-layered (1,400), small-legacy (600),
+small-wide (1,400) and the custom package (12), the translation cached (a no-op build of the
+custom package in 3 ms, the cache file untouched), an edit re-read (the two modules of the
+library whose arguments changed rebuilt, as Lake did), `lakefile.lean` preferred, and all
+three refusals; the first translation of a corpus takes ~1.3 s (Lake elaborating the
+configuration).
+
 ## Measurements
 
 ## Conclusion
