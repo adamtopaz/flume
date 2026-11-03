@@ -98,8 +98,8 @@ the candidate's from 0.13 to 0.23 s.
 
 ## Conclusion
 
-- **C2's code is done and correct; its verdict is not.** Across five standard runs of
-  identical code (two in the previous iteration, three counting this one's two), artifacts
+- **C2's code is done and correct; its verdict is not.** Across four standard runs of
+  identical code (two in the previous iteration, two in this one), artifacts
   were identical to Lake's every time, the held-out corpora passed, and
   `tests/check_lakefile_lean.py` shows Lean-configured corpora building exactly as stock
   Lake builds them. Every run said `failure`, each on a different combination of
