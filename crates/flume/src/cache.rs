@@ -157,6 +157,11 @@ impl Cache {
         Cache { root }
     }
 
+    /// A directory in the cache for other things flume keeps per machine.
+    pub fn dir(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
+
     fn art_path(&self, hash: &str) -> PathBuf {
         self.root
             .join("art")
